@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Диагностика окружения бота БЕЗ nc и curl (их на DSM нет).
+"""Diagnose the bot environment WITHOUT nc or curl (absent on DSM).
 
-Запускать питоном из venv проекта:
+Run it with the project venv:
 
     cd /volume1/torrent-bot
     sudo .venv/bin/python deploy/check_proxy.py
 
-Скрипт проверяет по очереди:
+Checks, in order:
 
-  1) TCP-доступность SOCKS5-порта на OpenWrt;
-  2) выход в интернет ЧЕРЕЗ прокси   -> должен быть IP удалённого сервера;
-  3) выход в интернет НАПРЯМУЮ       -> должен быть IP вашего провайдера;
-  4) доступность rutracker.org через прокси;
-  5) что Transmission RPC отвечает напрямую, без прокси.
+  1) TCP reachability of the SOCKS5 port on OpenWrt;
+  2) internet access THROUGH the proxy  -> must be the remote server IP;
+  3) internet access DIRECTLY           -> must be the ISP IP (for comparison);
+  4) rutracker.org / kinozal.me reachability through the proxy;
+  5) that Transmission RPC answers directly, without a proxy.
 
-Вывод — только ASCII, чтобы не спотыкаться о локаль на DSM.
+Output is ASCII-only on purpose (safe on any DSM locale).
 """
 
 from __future__ import annotations
@@ -24,25 +24,25 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Чтобы запускать и из корня проекта, и из deploy/.
+# Allow running both from the project root and from deploy/.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     import requests
 except ImportError:
-    print("[FAIL] requests не установлен. Активируйте venv проекта: .venv/bin/python")
+    print("[FAIL] requests is not installed. Use the project venv: .venv/bin/python")
     sys.exit(2)
 
 try:
     import config as config_module
 except Exception as exc:  # noqa: BLE001
-    print(f"[FAIL] не удалось прочитать config.py: {exc}")
+    print(f"[FAIL] cannot read config.py: {exc}")
     sys.exit(2)
 
 
 def _reconfigure_stdout() -> None:
-    """Не падать на юникоде, если локаль на DSM кривая."""
+    """Never crash on unicode if the DSM locale is broken."""
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
@@ -59,7 +59,7 @@ def make_proxies(url: str) -> dict:
 
 
 def direct_session() -> requests.Session:
-    """Сессия строго без прокси — как клиент Transmission в боте."""
+    """A session strictly without a proxy - same as the Transmission client."""
     session = requests.Session()
     session.trust_env = False
     session.proxies = {}
@@ -78,9 +78,9 @@ def line(name: str, ok: bool, detail: str = "") -> bool:
 def check_tcp(host: str, port: int, timeout: float = 5.0):
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            return True, f"{host}:{port} принимает TCP-соединения"
+            return True, f"{host}:{port} accepts TCP connections"
     except OSError as exc:
-        return False, f"{host}:{port} недоступен: {exc}"
+        return False, f"{host}:{port} unreachable: {exc}"
 
 
 def check_exit_ip_via_proxy(proxy_url: str, user_agent: str):
@@ -91,9 +91,9 @@ def check_exit_ip_via_proxy(proxy_url: str, user_agent: str):
             timeout=20,
             headers={"User-Agent": user_agent},
         )
-        return True, f"HTTP {response.status_code}, внешний IP через прокси: {response.text.strip()}"
+        return True, f"HTTP {response.status_code}, exit IP via proxy: {response.text.strip()}"
     except Exception as exc:  # noqa: BLE001
-        return False, f"запрос через прокси не удался: {type(exc).__name__}: {exc}"
+        return False, f"request through the proxy failed: {type(exc).__name__}: {exc}"
 
 
 def check_exit_ip_direct(user_agent: str):
@@ -101,9 +101,9 @@ def check_exit_ip_direct(user_agent: str):
         response = direct_session().get(
             "https://api.ipify.org", timeout=20, headers={"User-Agent": user_agent}
         )
-        return True, f"HTTP {response.status_code}, прямой внешний IP: {response.text.strip()}"
+        return True, f"HTTP {response.status_code}, direct exit IP: {response.text.strip()}"
     except Exception as exc:  # noqa: BLE001
-        return False, f"прямой запрос не удался: {type(exc).__name__}: {exc}"
+        return False, f"direct request failed: {type(exc).__name__}: {exc}"
 
 
 def check_tracker(proxy_url: str, user_agent: str):
@@ -118,7 +118,7 @@ def check_tracker(proxy_url: str, user_agent: str):
                 headers={"User-Agent": user_agent},
                 allow_redirects=True,
             )
-            # Любой HTTP-ответ означает, что путь через прокси рабочий.
+            # Any HTTP response means the path through the proxy works.
             results.append(f"{url} -> HTTP {response.status_code}")
             ok_any = True
         except Exception as exc:  # noqa: BLE001
@@ -130,16 +130,16 @@ def check_transmission():
     try:
         from transmission_client import TransmissionClient, TransmissionUnavailable
     except Exception as exc:  # noqa: BLE001
-        return False, f"не удалось импортировать transmission_client: {exc}"
+        return False, f"cannot import transmission_client: {exc}"
 
     client = TransmissionClient(config_module.CONFIG)
     try:
         torrents = client.get_status()
-        return True, f"RPC отвечает, торрентов в списке: {len(torrents)} (прокси не используется)"
+        return True, f"RPC is alive, torrents: {len(torrents)} (no proxy involved)"
     except TransmissionUnavailable as exc:
-        return False, f"Transmission недоступен: {exc}"
+        return False, f"Transmission unavailable: {exc}"
     except Exception as exc:  # noqa: BLE001
-        return False, f"ошибка обращения к Transmission: {type(exc).__name__}: {exc}"
+        return False, f"Transmission request error: {type(exc).__name__}: {exc}"
 
 
 def main() -> int:
@@ -150,61 +150,60 @@ def main() -> int:
     ua = cfg.user_agent
 
     print("=" * 68)
-    print("  Диагностика torrent-bot")
+    print("  torrent-bot diagnostics")
     print("=" * 68)
     print(f"PROXY_URL        : {cfg.proxy_url}")
     print(f"Transmission RPC : {cfg.transmission_host}:{cfg.transmission_port}")
-    print(f"Схема прокси     : {scheme or '(не разобрана)'}")
+    print(f"Proxy scheme     : {scheme or '(not parsed)'}")
     print("-" * 68)
 
     if not host or not port:
-        line("Разбор PROXY_URL", False, "не удалось выделить хост/порт из PROXY_URL")
+        line("Parse PROXY_URL", False, "cannot extract host/port from PROXY_URL")
         return 1
 
     if host in ("127.0.0.1", "localhost", "::1"):
         print(
-            "[WARN] PROXY_URL указывает на localhost. На Xpenology это сам Xpenology,\n"
-            "       а не OpenWrt! Укажите LAN-адрес OpenWrt, например socks5h://192.168.1.2:20170"
+            "[WARN] PROXY_URL points to localhost. On Xpenology that is Xpenology\n"
+            "       itself, not OpenWrt! Use the OpenWrt LAN address, e.g.\n"
+            "       socks5h://192.168.1.2:20170"
         )
         print("-" * 68)
 
     results = []
 
     ok, detail = check_tcp(host, port)
-    results.append(line(f"1) TCP до прокси {host}:{port}", ok, detail))
+    results.append(line(f"1) TCP to proxy {host}:{port}", ok, detail))
     if not ok:
         print("-" * 68)
-        print("Дальнейшие проверки через прокси бессмысленны.")
-        print("Смотрите на OpenWrt:")
+        print("Testing through the proxy is pointless.")
+        print("On OpenWrt check:")
         print("  netstat -lnpt | grep %s" % port)
-        print("Должно быть 0.0.0.0:%s, а не 127.0.0.1:%s." % (port, port))
-        print("Если там 127.0.0.1 -> включите Port sharing в панели v2rayA,")
-        print("либо поднимите проброс: socat TCP-LISTEN:%s,fork,reuseaddr \\" % port)
-        print("                            TCP:127.0.0.1:%s" % port)
+        print("Expect 0.0.0.0:%s (or :::%s), not 127.0.0.1:%s." % (port, port, port))
+        print("If it is 127.0.0.1, expose the port (see README section 4).")
         print("-" * 68)
         return 1
 
     if scheme in ("socks5h", "socks5", "http", "https"):
-        results.append(line("2) Выход через прокси", *check_exit_ip_via_proxy(cfg.proxy_url, ua)))
+        results.append(line("2) Exit via proxy", *check_exit_ip_via_proxy(cfg.proxy_url, ua)))
     else:
-        results.append(line("2) Выход через прокси", False, f"неизвестная схема: {scheme}"))
+        results.append(line("2) Exit via proxy", False, f"unknown scheme: {scheme}"))
 
-    results.append(line("3) Выход напрямую (для сравнения)", *check_exit_ip_direct(ua)))
+    results.append(line("3) Exit directly (for comparison)", *check_exit_ip_direct(ua)))
 
     tracker_ok, tracker_detail = check_tracker(cfg.proxy_url, ua)
-    results.append(line("4) Трекеры через прокси", tracker_ok, tracker_detail))
+    results.append(line("4) Trackers via proxy", tracker_ok, tracker_detail))
 
-    results.append(line("5) Transmission напрямую", *check_transmission()))
+    results.append(line("5) Transmission directly", *check_transmission()))
 
     print("=" * 68)
     if all(results):
-        print("ИТОГ: всё в порядке.")
+        print("RESULT: everything is fine.")
         return 0
 
-    print("ИТОГ: есть проблемы (см. FAIL выше).")
+    print("RESULT: problems found (see FAIL above).")
     if not results[1] and results[0]:
-        print("Подсказка: TCP есть, а через SOCKS не ходит — проверьте, что в v2rayA")
-        print("выбран рабочий узел/группа и режим правил пускает трафик через прокси.")
+        print("Hint: TCP works but SOCKS does not - make sure v2rayA has a working")
+        print("node/outbound selected and its rules route this traffic via the proxy.")
     return 1
 
 

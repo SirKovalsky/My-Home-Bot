@@ -1,39 +1,39 @@
 #!/bin/sh /etc/rc.common
 # =============================================================================
-#  xray-socks-lan — маленький ВТОРОЙ инстанс xray.
+#  xray-socks-lan - a small SECOND xray instance.
 #
-#  Зачем: v2rayA держит свой SOCKS5 только на 127.0.0.1 (проверяется
-#  `netstat -lnpt | grep 20170`). Пакетов на роутере нет (opkg/apk отсутствуют),
-#  поэтому берём уже установленный бинарник xray и поднимаем отдельный процесс,
-#  который:
-#      слушает SOCKS5 на 0.0.0.0:1080
-#      и отправляет всё в SOCKS5 v2rayA на 127.0.0.1:20170.
+#  Why: v2rayA keeps its SOCKS5 inbound on 127.0.0.1 only
+#  (check with: netstat -lnpt | grep 20170). There is no package manager on
+#  this router, so we reuse the already installed xray binary and start a
+#  separate process that:
+#      listens for SOCKS5 on 0.0.0.0:1080
+#      and forwards everything to v2rayA's SOCKS5 on 127.0.0.1:20170.
 #
-#  Процесс полностью изолирован: если он не стартует или падает, основной прокси
-#  (v2rayA) и остальные клиенты не затрагиваются.
+#  The process is fully isolated: if it fails to start or crashes, the main
+#  proxy (v2rayA) and the other LAN clients are not affected.
 #
-#  Установка:
-#      readlink -f /proc/$(pidof xray)/exe      # узнать путь к бинарнику
+#  Install:
+#      readlink -f /proc/$(pidof xray)/exe      # find the binary path
 #      cp xray-socks-lan.json /etc/xray-socks-lan.json
 #      cp xray-socks-lan.init /etc/init.d/xray-socks-lan
 #      chmod +x /etc/init.d/xray-socks-lan
-#      vi /etc/init.d/xray-socks-lan            # при необходимости поправьте пути
+#      vi /etc/init.d/xray-socks-lan            # adjust paths if needed
 #      /etc/init.d/xray-socks-lan enable
 #      /etc/init.d/xray-socks-lan start
 #      logread -e xray-socks-lan
 #
-#  Проверка:
-#      netstat -lnpt | grep 1080               # ждём 0.0.0.0:1080
+#  Verify:
+#      netstat -lnpt | grep 1080                # expect 0.0.0.0:1080 or :::1080
 # =============================================================================
 
 START=98
 STOP=10
 USE_PROCD=1
 
-# >>> ОТРЕДАКТИРУЙТЕ ПОД СЕБЯ <<<
-# Путь к бинарнику xray (узнать: readlink -f /proc/$(pidof xray)/exe).
+# >>> EDIT FOR YOUR SETUP <<<
+# Path to the xray binary (find it with: readlink -f /proc/$(pidof xray)/exe).
 XRAY_BIN="/usr/bin/xray"
-# Конфиг второго инстанса.
+# Config file for the second instance.
 XRAY_CONF="/etc/xray-socks-lan.json"
 
 start_service() {
