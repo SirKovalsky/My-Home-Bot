@@ -49,9 +49,11 @@ torrent-bot/
     ├── torrent-bot.service   # шаблон systemd-юнита (DSM 6.2)
     ├── check_proxy.py        # диагностика прокси/Transmission без nc и curl
     └── openwrt/
-        ├── socks-lan.init    # проброс SOCKS5 в LAN через socat (procd)
+        ├── xray-socks-lan.json  # 2-й инстанс xray: SOCKS в LAN -> v2rayA
+        ├── xray-socks-lan.init  # автозапуск того же (procd)
+        ├── socks-lan.init       # альтернатива: проброс через socat (procd)
         └── confdir/
-            └── socks-lan.json # SOCKS-вход для --v2ray-confdir (без пакетов)
+            └── socks-lan.json   # альтернатива: вход для --v2ray-confdir
 ```
 
 ---
@@ -468,7 +470,59 @@ PROXY_URL=socks5h://192.168.1.2:1080
 
 Если `confdir` в `--help` отсутствует (слишком старая сборка) — переходите к B.
 
-### Способ B: проброс порта (`socat`/`ncat`)
+### Способ B: второй инстанс xray (бинарник уже есть)
+
+В `netstat` видно, что ядро — обычный **xray** (процесс `xray`, а не
+`v2raya_core`). Значит, можно поднять **второй, крошечный инстанс xray**:
+слушает SOCKS5 на `0.0.0.0:1080` и отправляет всё в SOCKS5 v2rayA на
+`127.0.0.1:20170`. Это отдельный процесс — если он не стартует или упадёт,
+v2rayA и остальные клиенты не затрагиваются (в отличие от правки её запуска).
+
+```bash
+# путь к бинарнику xray
+readlink -f /proc/$(pidof xray)/exe        # обычно /usr/bin/xray
+
+# конфиг второго инстанса (он же в репозитории: deploy/openwrt/xray-socks-lan.json)
+cat > /etc/xray-socks-lan.json <<'JSON'
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    { "tag": "socks-lan", "listen": "0.0.0.0", "port": 1080, "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": false } }
+  ],
+  "outbounds": [
+    { "tag": "via-v2raya", "protocol": "socks",
+      "settings": { "servers": [ { "address": "127.0.0.1", "port": 20170 } ] } }
+  ]
+}
+JSON
+
+# пробный запуск (Ctrl+C чтобы остановить)
+/usr/bin/xray run -config /etc/xray-socks-lan.json
+```
+
+Автозапуск — init-скрипт из репозитория:
+
+```bash
+scp deploy/openwrt/xray-socks-lan.init root@192.168.1.2:/etc/init.d/xray-socks-lan
+ssh root@192.168.1.2
+chmod +x /etc/init.d/xray-socks-lan
+vi /etc/init.d/xray-socks-lan      # при необходимости поправьте XRAY_BIN
+/etc/init.d/xray-socks-lan enable
+/etc/init.d/xray-socks-lan start
+netstat -lnpt | grep 1080          # ждём 0.0.0.0:1080
+```
+
+В `.env`:
+
+```env
+PROXY_URL=socks5h://192.168.1.2:1080
+```
+
+Цепочка: `Xpenology -> OpenWrt:1080 (свой xray) -> 127.0.0.1:20170 (SOCKS v2rayA)
+-> туннель`. Прозрачный прокси и Port Sharing не задействованы.
+
+### Способ C: проброс порта (`socat`/`ncat`)
 
 Подходит, если на роутере есть пакетный менеджер или нужная утилита уже стоит.
 Проверить:
