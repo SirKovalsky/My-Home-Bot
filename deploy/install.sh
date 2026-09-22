@@ -188,7 +188,10 @@ ask_valid() {
 	_errmsg=$4
 	while :; do
 		ask "$_prompt" "$_default"
-		if printf '%s' "$ANSWER" | grep -Eq "$_pattern"; then
+		# NOTE: the trailing newline matters - without it an empty answer
+		# gives grep zero lines, so a pattern that allows empty ("*") would
+		# never match.
+		if printf '%s\n' "$ANSWER" | grep -Eq "$_pattern"; then
 			return 0
 		fi
 		printf '  ! %s\n' "$_errmsg"
@@ -201,7 +204,7 @@ ask_port() {
 	_default=$2
 	while :; do
 		ask "$_prompt" "$_default"
-		if printf '%s' "$ANSWER" | grep -Eq '^[0-9]{1,5}$' \
+		if printf '%s\n' "$ANSWER" | grep -Eq '^[0-9]{1,5}$' \
 			&& [ "$ANSWER" -ge 1 ] && [ "$ANSWER" -le 65535 ]; then
 			return 0
 		fi
