@@ -796,6 +796,7 @@ PY
 | `требует авторизацию` | истекли cookies → `/login_rutracker` или `/login_kinozal` |
 | `Transmission недоступен` | RPC выключен, неверный порт/логин, или `localhost` в контейнере ≠ хост |
 | Трекер отдал `403/429` | бан UA/лимит; смените `USER_AGENT`, уменьшите частоту запросов |
+| `ps w \| grep xray` показывает несколько процессов с `/etc/xray-socks-lan.json` | остался ручной запуск. Init-скрипт при старте сам убивает «осиротевшие»; вручную: `kill <pid>` лишнего либо `/etc/init.d/xray-socks-lan restart` |
 
 Логи пишутся одновременно в stdout и в файл `LOG_FILE` (по умолчанию
 `torrent-bot.log`).

@@ -12,6 +12,11 @@
 #  The process is fully isolated: if it fails to start or crashes, the main
 #  proxy (v2rayA) and the other LAN clients are not affected.
 #
+#  Single-instance guarantee: procd never starts a duplicate of its own
+#  instance, but a MANUAL foreground run (`xray run -config ...`) would leave
+#  an extra process holding port 1080. start_service() therefore kills any
+#  leftover process that uses this config before starting its own.
+#
 #  Install:
 #      readlink -f /proc/$(pidof xray)/exe      # find the binary path
 #      cp xray-socks-lan.json /etc/xray-socks-lan.json
@@ -24,6 +29,7 @@
 #
 #  Verify:
 #      netstat -lnpt | grep 1080                # expect 0.0.0.0:1080 or :::1080
+#      ps w | grep xray                         # exactly ONE process per config
 # =============================================================================
 
 START=98
@@ -36,6 +42,29 @@ XRAY_BIN="/usr/bin/xray"
 # Config file for the second instance.
 XRAY_CONF="/etc/xray-socks-lan.json"
 
+# Echo PIDs of xray processes that run with our config file.
+# We read /proc/<pid>/cmdline directly, so no pgrep/ps parsing is needed and
+# the main v2rayA core (a different config) is never matched.
+stray_pids() {
+	for d in /proc/[0-9]*; do
+		pid=${d#/proc/}
+		[ -r "$d/cmdline" ] || continue
+		cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+		case "$cmd" in
+			*xray*"$XRAY_CONF"*) echo "$pid" ;;
+		esac
+	done
+}
+
+kill_strays() {
+	for pid in $(stray_pids); do
+		logger -t xray-socks-lan "killing stray instance pid=$pid"
+		kill "$pid" 2>/dev/null
+	done
+	# Give them a moment to release port 1080.
+	sleep 1
+}
+
 start_service() {
 	if [ ! -x "$XRAY_BIN" ]; then
 		logger -t xray-socks-lan "binary not found or not executable: $XRAY_BIN"
@@ -45,6 +74,9 @@ start_service() {
 		logger -t xray-socks-lan "config not found: $XRAY_CONF"
 		return 1
 	fi
+
+	# Never allow more than one instance for this config.
+	kill_strays
 
 	procd_open_instance
 	procd_set_param command "$XRAY_BIN" run -config "$XRAY_CONF"

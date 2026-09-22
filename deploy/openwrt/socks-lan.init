@@ -12,6 +12,9 @@
 #      apk add socat            # newer OpenWrt
 #      opkg update && opkg install socat
 #
+#  Single-instance guarantee: any leftover socat bound to our listen port
+#  (e.g. from a manual foreground run) is killed before starting.
+#
 #  Install:
 #      cp socks-lan.init /etc/init.d/socks-lan
 #      chmod +x /etc/init.d/socks-lan
@@ -37,11 +40,33 @@ LISTEN_ADDR="0.0.0.0"
 # SOCKS5 port from v2rayA: Setting -> Address and Ports -> "Port of SOCKS5".
 SOCKS_PORT="20170"
 
+# Echo PIDs of socat processes already listening on our port.
+stray_pids() {
+	for d in /proc/[0-9]*; do
+		pid=${d#/proc/}
+		[ -r "$d/cmdline" ] || continue
+		cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+		case "$cmd" in
+			*socat*"TCP-LISTEN:${SOCKS_PORT}"*) echo "$pid" ;;
+		esac
+	done
+}
+
+kill_strays() {
+	for pid in $(stray_pids); do
+		logger -t socks-lan "killing stray socat pid=$pid"
+		kill "$pid" 2>/dev/null
+	done
+	sleep 1
+}
+
 start_service() {
 	if ! command -v socat >/dev/null 2>&1; then
 		logger -t socks-lan "socat not found; install it first (apk add socat / opkg install socat)"
 		return 1
 	fi
+
+	kill_strays
 
 	procd_open_instance
 	procd_set_param command /usr/bin/socat \
