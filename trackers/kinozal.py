@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import List, Optional
+from urllib.parse import quote_plus
 
 from .base import (
     BaseTracker,
@@ -119,9 +120,13 @@ class KinozalTracker(BaseTracker):
     # ------------------------------------------------------------------ #
     #  Поиск
     # ------------------------------------------------------------------ #
+    def search_url(self, query: str) -> str:
+        """Ссылка на результаты поиска (открывается в браузере)."""
+        return f"{self.base_url}browse.php?s={quote_plus(query)}"
+
     def search_html(self, query: str) -> str:
         """Сырой HTML страницы поиска (запрос идёт через прокси)."""
-        return self.fetch(f"{self.base_url}browse.php", params={"s": query}).text
+        return self.fetch(self.search_url(query)).text
 
     def search(self, query: str, limit: int = 10) -> List[SearchResult]:
         query = (query or "").strip()

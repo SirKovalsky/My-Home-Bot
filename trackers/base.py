@@ -438,6 +438,10 @@ class BaseTracker(ABC):
         """Сырой HTML страницы поиска — для диагностики парсера."""
         raise NotImplementedError
 
+    def search_url(self, query: str) -> str:
+        """Ссылка на страницу поиска этого трекера (для открытия в браузере)."""
+        raise NotImplementedError
+
     def is_logged_in(self) -> bool:
         """Эвристика: есть ли хотя бы одна сессионная cookie."""
         return bool(self._session.cookies)

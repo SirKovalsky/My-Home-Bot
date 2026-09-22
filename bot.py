@@ -476,12 +476,13 @@ async def _run_search(message: Message, query: str) -> None:
     results, errors = await _search_all(query)
 
     if not results:
-        text = "🤷 Ничего не нашлось."
-        if any("just a moment" in err.lower() for err in errors):
-            text += "\n\n" + CLOUDFLARE_HINT
-        elif errors:
+        cloudflare = any("just a moment" in err.lower() for err in errors)
+        text = CLOUDFLARE_HINT if cloudflare else "🤷 Ничего не нашлось."
+        if errors:
             text += "\n\n" + "\n".join(errors)
-        return await status.edit_text(text)
+        return await status.edit_text(
+            text, reply_markup=_tracker_search_keyboard(query)
+        )
 
     _prune_pending()
     token = secrets.token_urlsafe(6)
@@ -695,7 +696,11 @@ async def on_pick_result(callback: CallbackQuery) -> None:
         return await _edit(callback, f"🔑 {exc}")
     except CaptchaError as exc:
         if _is_cloudflare(exc):
-            return await _edit(callback, CLOUDFLARE_HINT)
+            return await _edit(
+                callback,
+                CLOUDFLARE_HINT,
+                reply_markup=_open_in_browser_keyboard(result.url, "🌐 Открыть раздачу"),
+            )
         return await _edit(callback, f"🤖 {exc}")
     except ProxyUnavailableError as exc:
         return await _edit(callback, f"🔌 Прокси недоступен: {exc}")
@@ -840,7 +845,10 @@ async def process_tracker_url(message: Message, tracker_name: str, url: str) -> 
         )
     except CaptchaError as exc:
         if _is_cloudflare(exc):
-            return await status.edit_text(CLOUDFLARE_HINT)
+            return await status.edit_text(
+                CLOUDFLARE_HINT,
+                reply_markup=_open_in_browser_keyboard(url, "🌐 Открыть раздачу"),
+            )
         return await status.edit_text(f"🤖 {exc}")
     except ProxyUnavailableError as exc:
         return await status.edit_text(
@@ -1014,16 +1022,20 @@ async def _respond(
     await message.answer(text, reply_markup=reply_markup)
 
 
-async def _edit(callback: CallbackQuery, text: str) -> None:
+async def _edit(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
     if not callback.message:
         return
     try:
-        await callback.message.edit_text(text)
+        await callback.message.edit_text(text, reply_markup=reply_markup)
     except Exception:  # noqa: BLE001
         try:
-            await callback.message.answer(text)
+            await callback.message.answer(text, reply_markup=reply_markup)
         except Exception:  # noqa: BLE001
-            log.warning("Не удалось отредактировать сообщение с выбором папки")
+            log.warning("Не удалось отредактировать сообщение")
 
 
 # --------------------------------------------------------------------------- #
@@ -1135,6 +1147,29 @@ CLOUDFLARE_HINT = (
 def _is_cloudflare(exc: Exception) -> bool:
     text = str(exc).lower()
     return "just a moment" in text or "cloudflare" in text
+
+
+def _open_in_browser_keyboard(
+    url: str, label: str = "🌐 Открыть в браузере"
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label, url=url)]]
+    )
+
+
+def _tracker_search_keyboard(query: str) -> Optional[InlineKeyboardMarkup]:
+    """Кнопки «искать в браузере» — работают, когда бот упёрся в Cloudflare."""
+    rows: List[List[InlineKeyboardButton]] = []
+    for name in ("rutracker", "kinozal"):
+        tracker = trackers.get(name)
+        if tracker is None:
+            continue
+        try:
+            url = tracker.search_url(query)
+        except Exception:  # noqa: BLE001
+            continue
+        rows.append([InlineKeyboardButton(text=f"🔎 Искать на {name}", url=url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 # --------------------------------------------------------------------------- #
