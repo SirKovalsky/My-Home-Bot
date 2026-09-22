@@ -1,0 +1,9 @@
+# Нормализация переводов строк: в репозитории всегда LF.
+* text=auto
+
+# Linux-артефакты никогда не должны попадать в CRLF.
+*.sh      text eol=lf
+*.service text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+.env.example text eol=lf

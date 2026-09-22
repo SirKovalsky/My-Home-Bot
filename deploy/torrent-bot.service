@@ -1,0 +1,37 @@
+[Unit]
+Description=Telegram torrent bot (Transmission autoloader)
+Documentation=https://github.com/SirKovalsky/My-Home-Bot
+# Сеть должна быть поднята до старта. После обновления DSM сеть у DSM
+# поднимается штатно, но network-online.target гарантирует наличие маршрута.
+Wants=network-online.target
+After=network-online.target
+
+# Если Transmission поставлен из SynoCommunity, раскомментируйте, чтобы бот
+# стартовал после демона Transmission:
+#After=transmission.service
+
+[Service]
+Type=simple
+# Пользователь, от имени которого работает бот. root проще всего;
+# при желании замените на sc-transmission или своего пользователя.
+User=__BOT_USER__
+WorkingDirectory=__INSTALL_DIR__
+
+# Юникод/буферизация — чтобы русские названия и логи были корректны.
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=LC_ALL=C.UTF-8
+
+ExecStart=__INSTALL_DIR__/.venv/bin/python __INSTALL_DIR__/bot.py
+
+# Автоперезапуск при падении (прокси/сеть/Transmission могут моргать).
+Restart=on-failure
+RestartSec=15
+
+# Логи пишутся и в файл (LOG_FILE в .env), и в journal:
+#   journalctl -u torrent-bot -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

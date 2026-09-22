@@ -1,0 +1,7 @@
+.env
+*.pickle
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/

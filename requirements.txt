@@ -1,0 +1,6 @@
+aiogram>=3.7,<4
+# requests + PySocks: PySocks обязателен для схем socks5h:// в параметре proxies.
+requests[socks]>=2.31
+# Обёртка Transmission RPC (работает через requests, используем БЕЗ прокси).
+transmission-rpc>=7.0.0
+python-dotenv>=1.0.0
