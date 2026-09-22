@@ -299,7 +299,7 @@ configure_env() {
 	ask_valid "  Address of the OpenWrt box (IP or hostname)" "$cur_host" \
 		'^[A-Za-z0-9._-]+$' "ASCII only, e.g. 192.168.1.2"
 	PROXY_HOST="$ANSWER"
-	ask_port "  Port (our xray-socks-lan = 1080, v2rayA SOCKS5 usually 20170)" \
+	ask_port "  Port (SOCKS port; our sample config uses 1080, v2rayA usually 20170)" \
 		"${cur_port:-1080}"
 	PROXY_PORT="$ANSWER"
 	if [ -n "$PROXY_HOST" ]; then
