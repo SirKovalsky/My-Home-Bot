@@ -20,5 +20,11 @@ typing-extensions>=4.7.0,<=5.0
 
 # PySocks (через extras socks) обязателен для схем socks5h://.
 requests[socks]==2.32.4
+
+# КРИТИЧНО для DSM 6.2: Python 3.8 в пакете Synology собран с OpenSSL 1.0.2u,
+# а urllib3 2.x требует OpenSSL 1.1.1+. Без этого пина requests падает с
+# "ImportError: urllib3 v2 only supports OpenSSL 1.1.1+".
+urllib3>=1.26,<2
+
 transmission-rpc==7.0.12
 python-dotenv==1.0.1

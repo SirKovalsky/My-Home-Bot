@@ -105,12 +105,22 @@ fi
 "$VENV_PY" -m pip install --quiet -r "$REQ_FILE"
 log "Dependencies installed ($(basename "$REQ_FILE"))."
 
+# Smoke test: fail here rather than at runtime. Catches, for example, the
+# urllib3 2.x vs OpenSSL 1.0.2u problem on DSM 6.2.
+log "Verifying dependency imports..."
+if ! IMPORT_OUT=$("$VENV_PY" -c 'import requests, urllib3, socks, aiogram, transmission_rpc, dotenv' 2>&1); then
+	err "Dependency smoke test failed:"
+	printf '%s\n' "$IMPORT_OUT" >&2
+	err "On DSM 6.2 the usual cause is urllib3 2.x with OpenSSL 1.0.2u:"
+	err "    $VENV_PY -m pip install 'urllib3<2'"
+	exit 1
+fi
 # PySocks is critical for socks5h:// - verify explicitly.
 if ! "$VENV_PY" -c 'import socks' 2>/dev/null; then
 	err "PySocks is missing - socks5h:// will not work!"
 	exit 1
 fi
-log "PySocks present (socks5h:// supported)."
+log "Dependencies import cleanly; PySocks present (socks5h:// supported)."
 
 # --- 3. Configuration ----------------------------------------------------- #
 if [ ! -f "$INSTALL_DIR/.env" ]; then
