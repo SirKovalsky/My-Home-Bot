@@ -9,6 +9,7 @@
 #      INSTALL_DIR=/volume1/My-Home-Bot   target dir (default: parent of deploy/)
 #      BOT_USER=root                      user the service runs as (systemd only)
 #      PYTHON=/path/to/python3            explicit Python 3.8+ interpreter
+#      NONINTERACTIVE=1                   skip the interactive .env setup
 #
 #  Autostart method is chosen automatically:
 #      1) systemd unit   - if /etc/systemd/system exists (DSM 7, most Linux)
@@ -115,23 +116,190 @@ if ! IMPORT_OUT=$("$VENV_PY" -c 'import requests, urllib3, socks, aiogram, trans
 	err "    $VENV_PY -m pip install 'urllib3<2'"
 	exit 1
 fi
-# PySocks is critical for socks5h:// - verify explicitly.
 if ! "$VENV_PY" -c 'import socks' 2>/dev/null; then
 	err "PySocks is missing - socks5h:// will not work!"
 	exit 1
 fi
 log "Dependencies import cleanly; PySocks present (socks5h:// supported)."
 
-# --- 3. Configuration ----------------------------------------------------- #
-if [ ! -f "$INSTALL_DIR/.env" ]; then
-	cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
-	log ".env created from .env.example - EDIT IT:"
-	log "    nano $INSTALL_DIR/.env"
+# --- 3. .env file --------------------------------------------------------- #
+ENV_FILE="$INSTALL_DIR/.env"
+if [ ! -f "$ENV_FILE" ]; then
+	cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
+	log ".env created from .env.example"
 else
-	log ".env already exists - left unchanged."
+	log ".env already exists - it will be updated in place"
 fi
 
-# --- 4. Autostart ---------------------------------------------------------- #
+# --- 4. Interactive configuration ----------------------------------------- #
+current_value() {
+	grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-
+}
+
+set_env() {
+	# Robust in-place update (values may contain / : + = etc).
+	"$VENV_PY" - "$ENV_FILE" "$1" "$2" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+key, value = sys.argv[2], sys.argv[3]
+lines = path.read_text(encoding="utf-8").splitlines()
+out, found = [], False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(f"{key}={value}")
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
+mask() {
+	[ -n "$1" ] || { echo "(empty)"; return; }
+	printf '%s****' "$(printf '%s' "$1" | cut -c1-4)"
+}
+
+ANSWER=""
+ask() {
+	_prompt=$1
+	_default=$2
+	if [ -n "$_default" ]; then
+		printf '%s [%s]: ' "$_prompt" "$_default"
+	else
+		printf '%s: ' "$_prompt"
+	fi
+	read -r ANSWER || ANSWER=""
+	[ -n "$ANSWER" ] || ANSWER="$_default"
+}
+
+is_placeholder() {
+	case "$1" in
+		""|123456:*|you@example.com) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+INTERACTIVE=1
+if [ "${NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+	INTERACTIVE=0
+fi
+
+configure_env() {
+	cur_token="$(current_value TELEGRAM_BOT_TOKEN)"
+	if is_placeholder "$cur_token"; then cur_token=""; fi
+
+	if [ -n "$cur_token" ]; then
+		printf 'Setup looks complete. Re-run interactive configuration? [y/N]: '
+		read -r _again || _again=""
+		case "$_again" in
+			[Yy]*) ;;
+			*) log "Keeping the existing .env unchanged."; return 0 ;;
+		esac
+	fi
+
+	echo
+	log "Interactive setup. Press Enter to keep the value in brackets."
+	echo
+
+	# --- Telegram ---
+	echo "-- Telegram --"
+	ask "  Bot token (from @BotFather)" "$cur_token"
+	if [ -n "$ANSWER" ]; then
+		set_env TELEGRAM_BOT_TOKEN "$ANSWER"
+	fi
+
+	ask "  Allowed user ids (comma separated, empty = everyone)" "$(current_value ALLOWED_USER_IDS)"
+	set_env ALLOWED_USER_IDS "$ANSWER"
+
+	# --- Proxy to trackers ---
+	echo
+	echo "-- Proxy on OpenWrt (trackers only) --"
+	cur_url="$(current_value PROXY_URL)"
+	cur_scheme="socks5h"; cur_host=""; cur_port=""
+	case "$cur_url" in
+		*"://"*)
+			cur_scheme="${cur_url%%://*}"
+			_rest="${cur_url#*://}"
+			case "$_rest" in
+				*:*) cur_host="${_rest%%:*}"; cur_port="${_rest##*:}" ;;
+				*) cur_host="$_rest" ;;
+			esac
+			;;
+	esac
+	[ -n "$cur_host" ] || cur_host=""
+
+	ask "  Scheme (socks5h recommended)" "${cur_scheme:-socks5h}"
+	PROXY_SCHEME="$ANSWER"
+	ask "  OpenWrt address (IP or hostname)" "$cur_host"
+	PROXY_HOST="$ANSWER"
+	ask "  Port (xray-socks-lan uses 1080; v2rayA SOCKS5 usually 20170)" "${cur_port:-1080}"
+	PROXY_PORT="$ANSWER"
+	if [ -n "$PROXY_HOST" ]; then
+		set_env PROXY_URL "${PROXY_SCHEME}://${PROXY_HOST}:${PROXY_PORT}"
+	fi
+
+	# --- Transmission RPC (no proxy) ---
+	echo
+	echo "-- Transmission RPC (used WITHOUT proxy) --"
+	ask "  Host" "$(current_value TRANSMISSION_HOST)"
+	set_env TRANSMISSION_HOST "$ANSWER"
+	ask "  Port" "$(current_value TRANSMISSION_PORT)"
+	set_env TRANSMISSION_PORT "$ANSWER"
+	ask "  RPC username (empty if none)" "$(current_value TRANSMISSION_USER)"
+	set_env TRANSMISSION_USER "$ANSWER"
+	ask "  RPC password (empty if none)" "$(current_value TRANSMISSION_PASSWORD)"
+	set_env TRANSMISSION_PASSWORD "$ANSWER"
+
+	# --- Download dirs ---
+	echo
+	echo "-- Download folders (Plex) --"
+	ask "  Base directory" "/volume2/downloads2"
+	BASE_DIR_DL="$ANSWER"
+	set_env DOWNLOAD_DIR_MOVIES "$BASE_DIR_DL/Movies"
+	set_env DOWNLOAD_DIR_SERIES "$BASE_DIR_DL/Series"
+	set_env DOWNLOAD_DIR_ANIME "$BASE_DIR_DL/Anime"
+	set_env DOWNLOAD_DIR_AUDIOBOOKS "$BASE_DIR_DL/Audiobooks"
+	set_env DOWNLOAD_DIR_MUSIC "$BASE_DIR_DL/Music"
+	set_env DOWNLOAD_DIR_SOFT "$BASE_DIR_DL/Soft"
+	set_env DOWNLOAD_DIR_DEFAULT "$BASE_DIR_DL/Movies"
+
+	# --- Trackers ---
+	echo
+	echo "-- Tracker accounts (used by /login_rutracker and /login_kinozal) --"
+	echo "   NOTE: input is visible on screen."
+	ask "  rutracker login (empty to skip)" "$(current_value RUTRACKER_LOGIN)"
+	set_env RUTRACKER_LOGIN "$ANSWER"
+	ask "  rutracker password" "$(current_value RUTRACKER_PASSWORD)"
+	set_env RUTRACKER_PASSWORD "$ANSWER"
+	ask "  kinozal login (empty to skip)" "$(current_value KINOZAL_LOGIN)"
+	set_env KINOZAL_LOGIN "$ANSWER"
+	ask "  kinozal password" "$(current_value KINOZAL_PASSWORD)"
+	set_env KINOZAL_PASSWORD "$ANSWER"
+
+	# --- Summary ---
+	echo
+	log "Configuration written to $ENV_FILE"
+	echo "    TELEGRAM_BOT_TOKEN : $(mask "$(current_value TELEGRAM_BOT_TOKEN)")"
+	echo "    ALLOWED_USER_IDS   : $(current_value ALLOWED_USER_IDS)"
+	echo "    PROXY_URL          : $(current_value PROXY_URL)"
+	echo "    TRANSMISSION       : $(current_value TRANSMISSION_HOST):$(current_value TRANSMISSION_PORT)"
+	echo "    DOWNLOAD_DIR_MOVIES: $(current_value DOWNLOAD_DIR_MOVIES)"
+	echo "    RUTRACKER_LOGIN    : $(current_value RUTRACKER_LOGIN)"
+	echo "    KINOZAL_LOGIN      : $(current_value KINOZAL_LOGIN)"
+	echo
+}
+
+if [ "$INTERACTIVE" = "1" ]; then
+	configure_env
+else
+	warn "Non-interactive mode: skipping the .env setup."
+	warn "Edit it manually: nano $ENV_FILE"
+fi
+
+# --- 5. Autostart ---------------------------------------------------------- #
 install_systemd() {
 	[ -d "$SYSTEMD_DIR" ] || return 1
 	command -v systemctl >/dev/null 2>&1 || return 1
@@ -208,9 +376,9 @@ elif install_rcd; then
 	AUTOSTART="rcd"
 fi
 
-# --- 5. Start -------------------------------------------------------------- #
+# --- 6. Start -------------------------------------------------------------- #
 TOKEN_SET=0
-if grep -q '^TELEGRAM_BOT_TOKEN=.\+' "$INSTALL_DIR/.env" 2>/dev/null; then
+if grep -q '^TELEGRAM_BOT_TOKEN=.\+' "$ENV_FILE" 2>/dev/null; then
 	TOKEN_SET=1
 fi
 
@@ -224,7 +392,7 @@ case "$AUTOSTART" in
 			log "Logs: journalctl -u $SERVICE_NAME -f   (or $INSTALL_DIR/torrent-bot.log)"
 		else
 			log "TELEGRAM_BOT_TOKEN is not set yet - not starting."
-			log "1) nano $INSTALL_DIR/.env"
+			log "1) nano $ENV_FILE"
 			log "2) systemctl enable --now $SERVICE_NAME"
 		fi
 	;;
@@ -235,7 +403,7 @@ case "$AUTOSTART" in
 			log "Logs: tail -f $INSTALL_DIR/torrent-bot.log"
 		else
 			log "TELEGRAM_BOT_TOKEN is not set yet - not starting."
-			log "1) nano $INSTALL_DIR/.env"
+			log "1) nano $ENV_FILE"
 			log "2) $RCD_DIR/S99${SERVICE_NAME}.sh start"
 		fi
 	;;
