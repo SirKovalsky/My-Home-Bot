@@ -32,6 +32,18 @@ class TransmissionUnavailable(Exception):
     """Transmission RPC недоступен."""
 
 
+def _field(torrent, name: str, default=None):
+    """Безопасно прочитать поле торрента.
+
+    transmission-rpc бросает KeyError на отсутствующее поле, поэтому обычный
+    ``getattr(obj, name, default)`` не спасает — default не срабатывает.
+    """
+    try:
+        return getattr(torrent, name)
+    except (KeyError, AttributeError, TypeError):
+        return default
+
+
 @dataclass
 class TorrentInfo:
     """Нормализованная информация о торренте."""
@@ -139,8 +151,17 @@ class TransmissionClient:
         except TransmissionError as exc:
             raise TransmissionUnavailable(f"Transmission отклонил торрент: {exc}") from exc
 
-        log.info("Добавлен торрент: %s -> %s", added.name, download_dir or "default")
-        return self._to_info(added)
+        log.info("Добавлен торрент: %s -> %s", _field(added, "name", ""), download_dir or "default")
+
+        # add_torrent отдаёт «частичную» запись (id/name), в ней нет status и
+        # прочих полей. Забираем полную, но и без неё не падаем.
+        info = self._to_info(added)
+        if info.id:
+            try:
+                info = self._to_info(client.get_torrent(info.id))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Не удалось дочитать торрент %s: %s", info.id, exc)
+        return info
 
     def get_status(self) -> List[TorrentInfo]:
         """Список активных загрузок."""
@@ -191,10 +212,13 @@ class TransmissionClient:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _to_info(torrent) -> TorrentInfo:
-        status = getattr(torrent, "status", "unknown")
+        # ВАЖНО: читаем только через _field(). У «частичной» записи (как раз
+        # то, что возвращает add_torrent) полей status/eta/… нет, и обычный
+        # getattr(torrent, "status", default) бросает KeyError, а не даёт default.
+        status = _field(torrent, "status", "unknown")
         if hasattr(status, "value"):  # Enum
             status = status.value
-        eta = getattr(torrent, "eta", None)
+        eta = _field(torrent, "eta")
         if eta is not None and getattr(eta, "total_seconds", None):
             try:
                 eta = int(eta.total_seconds())
@@ -203,22 +227,22 @@ class TransmissionClient:
 
         # В Transmission RPC поле percentDone — доля 0..1, в некоторых версиях
         # библиотека уже отдаёт проценты. Нормализуем к 0..100.
-        raw_percent = float(getattr(torrent, "percent_done", 0.0) or 0.0)
+        raw_percent = float(_field(torrent, "percent_done", 0.0) or 0.0)
         if raw_percent <= 1.0:
             raw_percent *= 100.0
 
         return TorrentInfo(
-            id=getattr(torrent, "id", 0),
-            name=getattr(torrent, "name", ""),
+            id=int(_field(torrent, "id", 0) or 0),
+            name=_field(torrent, "name", "") or "",
             status=str(status),
-            progress=float(getattr(torrent, "progress", 0.0) or 0.0),
+            progress=float(_field(torrent, "progress", 0.0) or 0.0),
             percent_done=raw_percent,
-            rate_download=float(getattr(torrent, "rate_download", 0) or 0),
-            rate_upload=float(getattr(torrent, "rate_upload", 0) or 0),
-            total_size=int(getattr(torrent, "total_size", 0) or 0),
-            downloaded=int(getattr(torrent, "downloaded_ever", 0) or 0),
+            rate_download=float(_field(torrent, "rate_download", 0) or 0),
+            rate_upload=float(_field(torrent, "rate_upload", 0) or 0),
+            total_size=int(_field(torrent, "total_size", 0) or 0),
+            downloaded=int(_field(torrent, "downloaded_ever", 0) or 0),
             eta=eta,
-            download_dir=getattr(torrent, "download_dir", "") or "",
+            download_dir=_field(torrent, "download_dir", "") or "",
         )
 
     # ------------------------------------------------------------------ #

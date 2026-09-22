@@ -169,7 +169,11 @@ def _bdecode(data: bytes, index: int = 0):
 
 
 def parse_torrent_bytes(raw: bytes) -> Dict:
-    """Парсит .torrent и возвращает метаданные (best effort, без падений)."""
+    """Парсит .torrent и возвращает метаданные (best effort, без падений).
+
+    В том числе список файлов — по нему видно, что внутри (видео, аудио, книги),
+    что помогает выбрать папку, когда название ни о чём не говорит.
+    """
     try:
         decoded, _ = _bdecode(raw)
     except Exception:
@@ -179,11 +183,99 @@ def parse_torrent_bytes(raw: bytes) -> Dict:
         return {}
 
     info = decoded.get(b"info", {})
+    files: List[str] = []
+    total_size = 0
+    if isinstance(info, dict):
+        if isinstance(info.get(b"files"), list):
+            for entry in info[b"files"]:
+                if not isinstance(entry, dict):
+                    continue
+                total_size += int(entry.get(b"length", 0) or 0)
+                parts = [
+                    _to_str(p) for p in entry.get(b"path", []) if isinstance(p, bytes)
+                ]
+                if parts:
+                    files.append("/".join(parts))
+        elif b"name" in info:
+            files.append(_to_str(info[b"name"]))
+            total_size = int(info.get(b"length", 0) or 0)
+
     return {
         "announce": _to_str(decoded.get(b"announce", b"")),
         "name": _to_str(info.get(b"name", b"")) if isinstance(info, dict) else "",
         "comment": _to_str(decoded.get(b"comment", b"")),
+        "files": files,
+        "length": total_size,
     }
+
+
+# Расширение -> «человеческий» тип содержимого.
+_CONTENT_TYPES = {
+    "mkv": "видео", "mp4": "видео", "avi": "видео", "ts": "видео", "m2ts": "видео",
+    "wmv": "видео", "mov": "видео", "webm": "видео",
+    "mp3": "аудио", "m4a": "аудио", "m4b": "аудио", "flac": "аудио",
+    "ape": "аудио", "ogg": "аудио", "opus": "аудио", "wav": "аудио",
+    "fb2": "книги", "epub": "книги", "pdf": "книги", "djvu": "книги", "mobi": "книги",
+    "iso": "образ", "exe": "софт", "msi": "софт", "dmg": "софт",
+    "apk": "софт", "deb": "софт", "rpm": "софт",
+}
+
+
+def content_kinds(raw: bytes) -> Dict[str, int]:
+    """Сколько файлов какого типа внутри раздачи (см. `_CONTENT_TYPES`)."""
+    files: List[str] = parse_torrent_bytes(raw).get("files") or []
+    counts: Dict[str, int] = {}
+    for path in files:
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        kind = _CONTENT_TYPES.get(ext)
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def summarize_content(raw: bytes) -> str:
+    """Короткая сводка «что внутри»: тип, число файлов, размер.
+
+    Пустая строка, если разобрать не удалось.
+    """
+    meta = parse_torrent_bytes(raw)
+    files: List[str] = meta.get("files") or []
+    if not files:
+        return ""
+
+    counts = content_kinds(raw)
+    unknown = len(files) - sum(counts.values())
+
+    parts = [f"{kind}: {n}" for kind, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+    if unknown > 0:
+        parts.append(f"прочее: {unknown}")
+    if not parts:
+        return ""
+    tail = f", {human_size(meta.get('length') or 0)}" if meta.get("length") else ""
+    return f"{len(files)} файл(ов) ({', '.join(parts)}{tail})"
+
+
+def detect_category_for_bytes(name: str, raw: bytes) -> str:
+    """Категория с учётом содержимого .torrent.
+
+    Если по названию ничего не понятно, смотрим на файлы: только видео — это
+    фильм, только аудио (и нет музыкальных маркеров в названии) — аудиокнига.
+    """
+    category = detect_category(name)
+    if category != config.CATEGORY_OTHER:
+        return category
+
+    kinds = content_kinds(raw)
+    if not kinds:
+        return category
+
+    has_video = bool(kinds.get("видео"))
+    has_audio = bool(kinds.get("аудио"))
+    if has_video and not has_audio:
+        return config.CATEGORY_MOVIES
+    if has_audio and not has_video:
+        return config.CATEGORY_AUDIOBOOKS
+    return category
 
 
 def _to_str(value) -> str:

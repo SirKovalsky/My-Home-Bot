@@ -885,7 +885,10 @@ async def propose_folder(
 ) -> None:
     _prune_pending()
 
-    suggested = torrent_parser.detect_category(name)
+    if torrent_bytes:
+        suggested = torrent_parser.detect_category_for_bytes(name, torrent_bytes)
+    else:
+        suggested = torrent_parser.detect_category(name)
     token = secrets.token_urlsafe(8)
     # user_id must be passed explicitly when called from a callback: there
     # message.from_user is the bot itself.
@@ -912,9 +915,17 @@ async def propose_folder(
             f"(⭐)\n<code>{suggested_dir}</code>"
         )
 
+    # Что внутри раздачи — помогает понять папку, когда имя ни о чём не говорит.
+    content_line = ""
+    if torrent_bytes:
+        summary = torrent_parser.summarize_content(torrent_bytes)
+        if summary:
+            content_line = f"📦 {summary}\n"
+
     text = (
         "🎯 <b>Куда сохранить?</b>\n\n"
-        f"<b>{_escape(name)}</b>\n\n"
+        f"<b>{_escape(name)}</b>\n"
+        f"{content_line}\n"
         f"{hint}\n\n"
         "Подтвердите кнопкой ниже или выберите другую папку."
     )
