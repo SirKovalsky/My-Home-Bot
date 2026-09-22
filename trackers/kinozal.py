@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import List, Optional
 
-from .base import BaseTracker, NotLoggedInError, TorrentResult, TrackerError
+from .base import (
+    BaseTracker,
+    NotLoggedInError,
+    SearchResult,
+    TorrentResult,
+    TrackerError,
+    clean_html,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +34,12 @@ DOWNLOAD_ID_FALLBACK_RE = re.compile(
 
 MAGNET_RE = re.compile(r"(magnet:\?[^\"'<\s]+)", re.IGNORECASE)
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+# Ссылки на раздачи в результатах поиска.
+SEARCH_LINK_RE = re.compile(
+    r'<a[^>]*\bhref="[^"]*?details\.php\?id=(\d+)[^"]*"[^>]*>(.*?)</a>',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class KinozalTracker(BaseTracker):
@@ -100,6 +113,44 @@ class KinozalTracker(BaseTracker):
             torrent_bytes=raw,
             extra={"topic_id": topic_id},
         )
+
+    # ------------------------------------------------------------------ #
+    #  Поиск
+    # ------------------------------------------------------------------ #
+    def search(self, query: str, limit: int = 10) -> List[SearchResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        log.info("[kinozal] поиск через прокси: %r", query)
+        html = self.fetch(f"{self.base_url}browse.php", params={"s": query}).text
+
+        if self._looks_logged_out(html):
+            raise NotLoggedInError(
+                "kinozal требует авторизацию. Выполните /login_kinozal."
+            )
+
+        results: List[SearchResult] = []
+        seen = set()
+        for match in SEARCH_LINK_RE.finditer(html):
+            topic_id = match.group(1)
+            if topic_id in seen:
+                continue
+            title = clean_html(match.group(2))
+            if not title:
+                continue
+            seen.add(topic_id)
+            results.append(
+                SearchResult(
+                    tracker=self.name,
+                    title=title,
+                    url=f"{self.base_url}details.php?id={topic_id}",
+                    topic_id=topic_id,
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
 
     def _download_torrent(self, download_url: str) -> bytes:
         log.info("[kinozal] скачиваю .torrent через прокси: %s", download_url)

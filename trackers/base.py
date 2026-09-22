@@ -14,13 +14,15 @@
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 import pickle
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -77,6 +79,31 @@ class TorrentResult:
     @property
     def is_magnet(self) -> bool:
         return bool(self.magnet) and not self.torrent_bytes
+
+
+@dataclass
+class SearchResult:
+    """Одна найденная раздача."""
+
+    tracker: str
+    title: str
+    url: str
+    topic_id: str = ""
+    size: str = ""
+
+
+# --------------------------------------------------------------------------- #
+#  Разбор HTML (best effort, без внешних зависимостей)
+# --------------------------------------------------------------------------- #
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def clean_html(text: str) -> str:
+    """Убирает теги и лишние пробелы из фрагмента HTML."""
+    text = _TAG_RE.sub("", text or "")
+    text = html_module.unescape(text)
+    return _WS_RE.sub(" ", text).strip()
 
 
 class BaseTracker(ABC):
@@ -236,6 +263,10 @@ class BaseTracker(ABC):
     @abstractmethod
     def resolve(self, url: str) -> TorrentResult:
         """Разбирает страницу раздачи и возвращает .torrent/magnet."""
+
+    @abstractmethod
+    def search(self, query: str, limit: int = 10) -> List[SearchResult]:
+        """Ищет раздачи по названию (запрос идёт через прокси)."""
 
     def is_logged_in(self) -> bool:
         """Эвристика: есть ли хотя бы одна сессионная cookie."""

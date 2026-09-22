@@ -22,7 +22,7 @@ import sys
 import time
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -50,6 +50,7 @@ from trackers import (
     NotLoggedInError,
     ProxyUnavailableError,
     RuTrackerTracker,
+    SearchResult,
     TrackerError,
 )
 from transmission_client import TransmissionClient, TransmissionUnavailable
@@ -176,12 +177,29 @@ class PendingTorrent:
 PENDING: Dict[str, PendingTorrent] = {}
 
 
+@dataclass
+class SearchSession:
+    """Результаты поиска, ожидающие выбора пользователя."""
+
+    token: str
+    user_id: int
+    query: str
+    results: List[SearchResult]
+    created: float
+
+
+SEARCHES: Dict[str, SearchSession] = {}
+
+
 def _prune_pending() -> None:
     ttl = CONFIG.confirm_ttl
     now = time.time()
     expired = [tok for tok, item in PENDING.items() if now - item.created > ttl]
     for tok in expired:
         PENDING.pop(tok, None)
+    expired = [tok for tok, item in SEARCHES.items() if now - item.created > ttl]
+    for tok in expired:
+        SEARCHES.pop(tok, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -233,6 +251,21 @@ def track_chat(message: Message) -> None:
         known_chats.add(message.chat.id)
 
 
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Статус", callback_data="menu|status"),
+                InlineKeyboardButton(text="📈 Статистика", callback_data="menu|stats"),
+            ],
+            [
+                InlineKeyboardButton(text="📁 Папки", callback_data="menu|dirs"),
+                InlineKeyboardButton(text="🔎 Поиск", callback_data="menu|search"),
+            ],
+        ]
+    )
+
+
 # --------------------------------------------------------------------------- #
 #  Команды
 # --------------------------------------------------------------------------- #
@@ -250,6 +283,7 @@ async def cmd_start(message: Message) -> None:
         "через прокси.\n\n"
         "<b>Папку загрузки подтверждаете вы</b> — бот только предлагает вариант.\n\n"
         "<b>Команды:</b>\n"
+        "/search запрос — поиск раздачи на трекерах\n"
         "/login_rutracker — обновить сессию rutracker\n"
         "/login_kinozal — обновить сессию kinozal\n"
         "/status — активные загрузки\n"
@@ -258,7 +292,8 @@ async def cmd_start(message: Message) -> None:
         "/help — эта справка\n\n"
         f"<i>Прокси для трекеров:</i> <code>{CONFIG.proxy_url}</code>\n"
         f"<i>Transmission:</i> <code>{CONFIG.transmission_host}:"
-        f"{CONFIG.transmission_port}</code> (без прокси)"
+        f"{CONFIG.transmission_port}</code> (без прокси)",
+        reply_markup=main_menu(),
     )
 
 
@@ -267,15 +302,19 @@ async def cmd_help(message: Message) -> None:
     await cmd_start(message)
 
 
+def _dirs_text() -> str:
+    lines = ["📂 <b>Папки загрузки</b>", ""]
+    for _cat, label, path in torrent_parser.category_choices():
+        lines.append(f"{label}: <code>{path}</code>")
+    return "\n".join(lines)
+
+
 @router.message(Command("dirs"))
 async def cmd_dirs(message: Message) -> None:
     if not is_allowed(message):
         return await deny(message)
     track_chat(message)
-    lines = ["📂 <b>Папки загрузки</b>", ""]
-    for cat, label, path in torrent_parser.category_choices():
-        lines.append(f"{label}: <code>{path}</code>")
-    await message.answer("\n".join(lines))
+    await message.answer(_dirs_text())
 
 
 @router.message(Command("login_rutracker"))
@@ -321,38 +360,21 @@ async def _do_login(message: Message, tracker_name: str) -> None:
         await message.answer(f"✅ Сессия {tracker_name} сохранена.")
 
 
-@router.message(Command("status"))
-async def cmd_status(message: Message) -> None:
-    if not is_allowed(message):
-        return await deny(message)
-    track_chat(message)
-    try:
-        torrents = await to_thread(transmission.get_status)
-    except TransmissionUnavailable as exc:
-        return await message.answer(f"⚠️ Transmission недоступен: {exc}")
-
+async def _status_text() -> str:
+    torrents = await to_thread(transmission.get_status)
     if not torrents:
-        return await message.answer("📭 Список загрузок пуст.")
-
+        return "📭 Список загрузок пуст."
     active = [t for t in torrents if t.status in ("downloading", "seeding")]
     header = f"📊 <b>Загрузки</b> ({len(torrents)} всего, {len(active)} активных)\n\n"
     body = "\n".join(TransmissionClient.format_torrent(t) for t in torrents[:20])
     note = "\n\n<i>Показаны первые 20.</i>" if len(torrents) > 20 else ""
-    await message.answer(header + body + note)
+    return header + body + note
 
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message) -> None:
-    if not is_allowed(message):
-        return await deny(message)
-    track_chat(message)
-    try:
-        stats = await to_thread(transmission.get_stats)
-        session = await to_thread(transmission.session_stats)
-    except TransmissionUnavailable as exc:
-        return await message.answer(f"⚠️ Transmission недоступен: {exc}")
-
-    await message.answer(
+async def _stats_text() -> str:
+    stats = await to_thread(transmission.get_stats)
+    session = await to_thread(transmission.session_stats)
+    return (
         "📈 <b>Статистика Transmission</b>\n\n"
         f"Торрентов всего: <b>{stats['total']}</b>\n"
         f"• качается: {stats['downloading']}\n"
@@ -363,6 +385,199 @@ async def cmd_stats(message: Message) -> None:
         f"За сессию скачано: {torrent_parser.human_size(session['downloaded_bytes'])}\n"
         f"За сессию отдано: {torrent_parser.human_size(session['uploaded_bytes'])}"
     )
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+    try:
+        text = await _status_text()
+    except TransmissionUnavailable as exc:
+        text = f"⚠️ Transmission недоступен: {exc}"
+    await message.answer(text, reply_markup=main_menu())
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+    try:
+        text = await _stats_text()
+    except TransmissionUnavailable as exc:
+        text = f"⚠️ Transmission недоступен: {exc}"
+    await message.answer(text, reply_markup=main_menu())
+
+
+# --------------------------------------------------------------------------- #
+#  Поиск по трекерам
+# --------------------------------------------------------------------------- #
+async def _search_all(query: str, per_tracker: int = 6) -> Tuple[List[SearchResult], List[str]]:
+    results: List[SearchResult] = []
+    errors: List[str] = []
+    for name in ("rutracker", "kinozal"):
+        tracker = trackers[name]
+        try:
+            results.extend(await to_thread(tracker.search, query, per_tracker))
+        except NotLoggedInError as exc:
+            errors.append(f"🔑 {name}: {exc}")
+        except CaptchaError as exc:
+            errors.append(f"🤖 {name}: {exc}")
+        except ProxyUnavailableError as exc:
+            errors.append(f"🔌 {name}: {exc}")
+        except TrackerError as exc:
+            errors.append(f"❌ {name}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Ошибка поиска на %s", name)
+            errors.append(f"💥 {name}: {exc}")
+    return results, errors
+
+
+def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for idx, item in enumerate(results):
+        label = f"{idx + 1}. [{item.tracker}] {item.title}"
+        if len(label) > 60:
+            label = label[:59] + "…"
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"pick|{token}|{idx}")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancelsearch|{token}")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("search"))
+async def cmd_search(message: Message) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+
+    query = (message.text or "").partition(" ")[2].strip()
+    if not query:
+        return await message.answer(
+            "🔎 <b>Поиск по трекерам</b>\n\n"
+            "Использование: <code>/search название</code>\n"
+            "Например: <code>/search Интерстеллар</code>\n\n"
+            "Ищет на rutracker и kinozal через прокси. Дальше выберете раздачу "
+            "кнопкой и подтвердите папку."
+        )
+
+    status = await message.answer(f"🔎 Ищу «{_escape(query)}» через прокси...")
+    results, errors = await _search_all(query)
+
+    if not results:
+        text = "🤷 Ничего не нашлось."
+        if errors:
+            text += "\n\n" + "\n".join(errors)
+        return await status.edit_text(text)
+
+    _prune_pending()
+    token = secrets.token_urlsafe(6)
+    SEARCHES[token] = SearchSession(
+        token=token,
+        user_id=message.from_user.id if message.from_user else 0,
+        query=query,
+        results=results,
+        created=time.time(),
+    )
+    await status.edit_text(
+        f"🔎 По запросу «{_escape(query)}» найдено {len(results)}. "
+        "Выберите раздачу:",
+        reply_markup=_search_keyboard(token, results),
+    )
+
+
+@router.callback_query(F.data.startswith("pick|"))
+async def on_pick_result(callback: CallbackQuery) -> None:
+    if not _user_allowed(callback.from_user.id):
+        return await callback.answer("⛔ Нет доступа", show_alert=True)
+
+    try:
+        _, token, idx_raw = (callback.data or "").split("|", 2)
+        idx = int(idx_raw)
+    except ValueError:
+        return await callback.answer("Некорректные данные", show_alert=True)
+
+    session = SEARCHES.get(token)
+    if not session:
+        return await callback.answer("⌛️ Поиск устарел, повторите /search.", show_alert=True)
+    if session.user_id != callback.from_user.id:
+        return await callback.answer("Это не ваш поиск.", show_alert=True)
+    if not 0 <= idx < len(session.results):
+        return await callback.answer("Некорректный выбор", show_alert=True)
+
+    result = session.results[idx]
+    SEARCHES.pop(token, None)
+    await callback.answer("Открываю раздачу...")
+
+    tracker = trackers[result.tracker]
+    try:
+        resolved = await to_thread(tracker.resolve, result.url)
+    except NotLoggedInError as exc:
+        return await _edit(callback, f"🔑 {exc}")
+    except CaptchaError as exc:
+        return await _edit(callback, f"🤖 {exc}")
+    except ProxyUnavailableError as exc:
+        return await _edit(callback, f"🔌 Прокси недоступен: {exc}")
+    except TrackerError as exc:
+        return await _edit(callback, f"❌ Ошибка трекера: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Ошибка разбора раздачи из поиска")
+        return await _edit(callback, f"💥 Внутренняя ошибка: {exc}")
+
+    if callback.message:
+        await propose_folder(
+            callback.message,
+            name=resolved.name or result.title,
+            magnet=resolved.magnet,
+            torrent_bytes=resolved.torrent_bytes,
+            source=f"{result.tracker}: {result.url}",
+            user_id=callback.from_user.id,
+        )
+
+
+@router.callback_query(F.data.startswith("cancelsearch|"))
+async def on_cancel_search(callback: CallbackQuery) -> None:
+    if not _user_allowed(callback.from_user.id):
+        return await callback.answer("⛔ Нет доступа", show_alert=True)
+    parts = (callback.data or "").split("|", 1)
+    SEARCHES.pop(parts[1] if len(parts) > 1 else "", None)
+    await callback.answer("Отменено.")
+    await _edit(callback, "🚫 Поиск отменён.")
+
+
+@router.callback_query(F.data.startswith("menu|"))
+async def on_menu(callback: CallbackQuery) -> None:
+    if not _user_allowed(callback.from_user.id):
+        return await callback.answer("⛔ Нет доступа", show_alert=True)
+
+    _, _, action = (callback.data or "menu|").partition("|")
+    await callback.answer()
+
+    try:
+        if action == "status":
+            text = await _status_text()
+        elif action == "stats":
+            text = await _stats_text()
+        elif action == "dirs":
+            text = _dirs_text()
+        elif action == "search":
+            text = "🔎 Пришлите: <code>/search название раздачи</code>"
+        else:
+            text = "Неизвестное действие."
+    except TransmissionUnavailable as exc:
+        text = f"⚠️ Transmission недоступен: {exc}"
+
+    if not callback.message:
+        return
+    try:
+        await callback.message.edit_text(text, reply_markup=main_menu())
+    except Exception:  # noqa: BLE001
+        await callback.message.answer(text, reply_markup=main_menu())
 
 
 # --------------------------------------------------------------------------- #
@@ -473,14 +688,20 @@ async def propose_folder(
     torrent_bytes: Optional[bytes] = None,
     source: str = "",
     status_message: Optional[Message] = None,
+    user_id: Optional[int] = None,
 ) -> None:
     _prune_pending()
 
     suggested = torrent_parser.detect_category(name)
     token = secrets.token_urlsafe(8)
+    # user_id must be passed explicitly when called from a callback: there
+    # message.from_user is the bot itself.
+    owner_id = user_id if user_id is not None else (
+        message.from_user.id if message.from_user else 0
+    )
     PENDING[token] = PendingTorrent(
         token=token,
-        user_id=message.from_user.id if message.from_user else 0,
+        user_id=owner_id,
         name=name,
         suggested=suggested,
         magnet=magnet,

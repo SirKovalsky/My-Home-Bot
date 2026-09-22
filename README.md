@@ -148,15 +148,18 @@ journalctl -u torrent-bot -f
 sudo systemctl restart torrent-bot
 ```
 
-На DSM 6.x `install.sh` дополнительно ставит **cron-watchdog**: каждые 5 минут
-запускается `S99torrent-bot.sh start`, который сначала проверяет pid — если бот
-жив, ничего не происходит, если упал — поднимается. Проверить и отключить:
+**Присмотр за процессом (DSM 6.x).** `crontab` есть не в каждой сборке DSM,
+поэтому watchdog сделан без cron: `install.sh` кладёт рядом с ботом скрипт
+`run-forever.sh`, который держит бота запущенным (перезапускает через 15 с,
+если процесс вышел). Его запускает и завершает rc.d-скрипт:
 
 ```bash
-crontab -l | grep torrent-bot            # посмотреть задание
-crontab -l | grep -v torrent-bot | crontab -   # убрать watchdog
-sudo WITH_CRON=0 sh deploy/install.sh    # переустановить без watchdog
+/usr/local/etc/rc.d/S99torrent-bot.sh start    # поднимает supervisor + бота
+/usr/local/etc/rc.d/S99torrent-bot.sh stop     # глушит supervisora и бота
+/usr/local/etc/rc.d/S99torrent-bot.sh status
 ```
+
+Так `start` идемпотентен: если supervisor уже работает, второй не создаётся.
 
 Ранние трейсбеки (до инициализации логгера) попадают в `torrent-bot.out`,
 сам лог бота — в `torrent-bot.log`.
@@ -213,7 +216,7 @@ exec ./.venv/bin/python bot.py >> /volume1/My-Home-Bot/torrent-bot.out 2>&1
 > попадёт в файл дважды. `.out` собирает только stderr и ранние трейсбеки.
 
 Минус Task Scheduler: нет автоперезапуска при падении. Стабильнее — rc.d-скрипт
-из `install.sh` (он же ставит cron-watchdog) или systemd-юнит.
+из `install.sh` (он же ставит supervisor `run-forever.sh`) или systemd-юнит.
 
 ### 2.4. Настройка Transmission RPC на DSM (перед первым запуском бота)
 
@@ -844,6 +847,10 @@ PY
 | `/status` | активные загрузки Transmission |
 | `/stats` | суммарные скорости и количество |
 | `/dirs` | список папок загрузки по категориям |
+| `/search запрос` | поиск раздачи на rutracker и kinozal (через прокси); найденное выбирается кнопкой, затем подтверждается папка |
+
+Проще всего начать с `/start` — под справкой появится меню из кнопок:
+**Статус**, **Статистика**, **Папки**, **Поиск**.
 
 Приём сообщений:
 

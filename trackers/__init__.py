@@ -5,6 +5,7 @@ from .base import (
     CaptchaError,
     NotLoggedInError,
     ProxyUnavailableError,
+    SearchResult,
     TorrentResult,
     TrackerError,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CaptchaError",
     "NotLoggedInError",
     "TorrentResult",
+    "SearchResult",
     "RuTrackerTracker",
     "KinozalTracker",
 ]

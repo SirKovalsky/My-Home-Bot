@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import List, Optional
 
-from .base import BaseTracker, NotLoggedInError, TorrentResult, TrackerError
+from .base import (
+    BaseTracker,
+    NotLoggedInError,
+    SearchResult,
+    TorrentResult,
+    TrackerError,
+    clean_html,
+)
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +31,12 @@ DOWNLOAD_LINK_ALT_RE = re.compile(r'(?:dl|download)\.php\?t=(\d+)', re.IGNORECAS
 
 MAGNET_RE = re.compile(r"(magnet:\?[^\"'<\s]+)", re.IGNORECASE)
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+# Ссылки на темы в результатах поиска (tracker.php).
+SEARCH_LINK_RE = re.compile(
+    r'<a[^>]*\bhref="[^"]*?viewtopic\.php\?[^"]*?\bt=(\d+)[^"]*"[^>]*>(.*?)</a>',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class RuTrackerTracker(BaseTracker):
@@ -101,6 +114,44 @@ class RuTrackerTracker(BaseTracker):
             torrent_bytes=raw,
             extra={"topic_id": topic_id},
         )
+
+    # ------------------------------------------------------------------ #
+    #  Поиск
+    # ------------------------------------------------------------------ #
+    def search(self, query: str, limit: int = 10) -> List[SearchResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        log.info("[rutracker] поиск через прокси: %r", query)
+        html = self.fetch(f"{self.base_url}tracker.php", params={"nm": query}).text
+
+        if self._looks_logged_out(html):
+            raise NotLoggedInError(
+                "rutracker требует авторизацию. Выполните /login_rutracker."
+            )
+
+        results: List[SearchResult] = []
+        seen = set()
+        for match in SEARCH_LINK_RE.finditer(html):
+            topic_id = match.group(1)
+            if topic_id in seen:
+                continue
+            title = clean_html(match.group(2))
+            if not title:
+                continue
+            seen.add(topic_id)
+            results.append(
+                SearchResult(
+                    tracker=self.name,
+                    title=title,
+                    url=f"{self.base_url}viewtopic.php?t={topic_id}",
+                    topic_id=topic_id,
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
 
     def _download_torrent(self, torrent_id: str) -> bytes:
         download_url = f"{self.base_url}dl.php?t={torrent_id}"

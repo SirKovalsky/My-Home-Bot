@@ -251,11 +251,15 @@ configure_env() {
 	echo "    TELEGRAM_BOT_TOKEN  : $(mask "$(current_value TELEGRAM_BOT_TOKEN)")"
 	echo "    ALLOWED_USER_IDS    : $(current_value ALLOWED_USER_IDS)"
 	echo "    DOWNLOAD_DIR_MOVIES : $(current_value DOWNLOAD_DIR_MOVIES)"
-	printf 'Review and change them now? [Y/n]: '
-	read -r _again || _again=""
-	case "$_again" in
-		[Nn]*) log "Keeping the existing .env unchanged."; return 0 ;;
-	esac
+	while :; do
+		printf 'Review and change them now? [Y/n]: '
+		read -r _again || _again=""
+		case "$_again" in
+			""|[Yy]*) break ;;
+			[Nn]*) log "Keeping the existing .env unchanged."; return 0 ;;
+			*) printf '  Please answer y or n.\n' ;;
+		esac
+	done
 
 	echo
 	log "Interactive setup. Press Enter to keep the value in brackets."
@@ -446,24 +450,31 @@ is_running() {
 
 start_bot() {
 	if is_running; then
-		echo "torrent-bot already running (pid \$(cat "\$PIDFILE"))"
+		echo "torrent-bot already running (supervisor pid \$(cat "\$PIDFILE"))"
 		return 0
 	fi
-	cd "\$BOT_DIR" || exit 1
-	PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 LC_ALL=C.UTF-8 \\
-		nohup "\$BOT_DIR/.venv/bin/python" "\$BOT_DIR/bot.py" >> "\$OUTFILE" 2>&1 &
+	if [ ! -x "\$BOT_DIR/run-forever.sh" ]; then
+		echo "missing \$BOT_DIR/run-forever.sh - run deploy/install.sh again"
+		return 1
+	fi
+	nohup "\$BOT_DIR/run-forever.sh" >> "\$OUTFILE" 2>&1 &
 	echo \$! > "\$PIDFILE"
-	echo "torrent-bot started (pid \$(cat "\$PIDFILE"))"
+	echo "torrent-bot started (supervisor pid \$(cat "\$PIDFILE"))"
 }
 
 stop_bot() {
-	if ! is_running; then
-		echo "torrent-bot is not running"
+	if [ -f "\$PIDFILE" ]; then
+		kill "\$(cat "\$PIDFILE")" 2>/dev/null
 		rm -f "\$PIDFILE"
-		return 0
 	fi
-	kill "\$(cat "\$PIDFILE")" 2>/dev/null
-	rm -f "\$PIDFILE"
+	# The supervisor is killed above; make sure the bot process itself is gone too.
+	for p in /proc/[0-9]*; do
+		pid=\${p#/proc/}
+		[ -r "\$p/cmdline" ] || continue
+		if grep -qa "\$BOT_DIR/bot.py" "\$p/cmdline" 2>/dev/null; then
+			kill "\$pid" 2>/dev/null
+		fi
+	done
 	echo "torrent-bot stopped"
 }
 
@@ -477,53 +488,28 @@ esac
 EOF
 
 	chmod +x "$RCD_SCRIPT"
+
+	# Supervisor loop: keeps the bot alive without systemd or cron (crontab is
+	# not present on every DSM build).
+	RUNNER="$INSTALL_DIR/run-forever.sh"
+	cat > "$RUNNER" <<EOF
+#!/bin/sh
+# Keeps torrent-bot running. Started by S99${SERVICE_NAME}.sh.
+
+BOT_DIR="$INSTALL_DIR"
+OUTFILE="\$BOT_DIR/torrent-bot.out"
+
+while :; do
+	PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 LC_ALL=C.UTF-8 \\
+		"\$BOT_DIR/.venv/bin/python" "\$BOT_DIR/bot.py" >> "\$OUTFILE" 2>&1
+	echo "\$(date '+%Y-%m-%d %H:%M:%S') bot exited, restarting in 15s" >> "\$OUTFILE"
+	sleep 15
+done
+EOF
+	chmod +x "$RUNNER"
+
+	log "supervisor installed: $RUNNER"
 	log "rc.d script installed: $RCD_SCRIPT"
-	return 0
-}
-
-# Keep the bot alive without systemd: a cron job runs "start" every 5 minutes.
-# The rc.d script's start is idempotent (it checks the pidfile first), so a
-# healthy bot is left alone. Disable with WITH_CRON=0.
-# cron may live outside PATH on DSM; look in the usual places too.
-find_crontab() {
-	for c in /usr/syno/bin/crontab /usr/bin/crontab /bin/crontab /sbin/crontab; do
-		if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
-	done
-	if command -v crontab >/dev/null 2>&1; then command -v crontab; return 0; fi
-	return 1
-}
-
-install_cron() {
-	[ "${WITH_CRON:-1}" = "1" ] || { log "cron watchdog disabled (WITH_CRON=0)"; return 0; }
-	[ -n "${RCD_SCRIPT:-}" ] || return 1
-
-	CRONTAB_BIN="$(find_crontab)" || {
-		warn "crontab not found - no cron watchdog. Use DSM Task Scheduler instead:"
-		warn "  Control Panel -> Task Scheduler -> Create -> Scheduled Task, every 5 min,"
-		warn "  user root, command: $RCD_DIR/S99${SERVICE_NAME}.sh start"
-		return 1
-	}
-
-	MARK="# torrent-bot-watchdog"
-	LINE="*/5 * * * * $RCD_SCRIPT start >/dev/null 2>&1 $MARK"
-
-	CURRENT="$("$CRONTAB_BIN" -l 2>/dev/null || true)"
-	if printf '%s\n' "$CURRENT" | grep -Fq "$MARK"; then
-		log "cron watchdog already installed"
-		return 0
-	fi
-
-	if ! CRON_ERR="$({ printf '%s\n' "$CURRENT"; printf '%s\n' "$LINE"; } \
-			| grep -v '^[[:space:]]*$' | "$CRONTAB_BIN" - 2>&1)"; then
-		warn "crontab write failed: $CRON_ERR"
-		return 1
-	fi
-
-	log "cron watchdog installed via $CRONTAB_BIN: every 5 min runs '$RCD_SCRIPT start'"
-	# Ask cron to reload; usually it notices the change by itself.
-	synoservice --restart crond >/dev/null 2>&1 \
-		|| /etc/init.d/crond restart >/dev/null 2>&1 \
-		|| true
 	return 0
 }
 
@@ -555,10 +541,6 @@ case "$AUTOSTART" in
 		fi
 	;;
 	rcd)
-		if ! install_cron; then
-			warn "Could not install the cron watchdog; add it manually if you want:"
-			warn "  crontab -e   ->  */5 * * * * $RCD_DIR/S99${SERVICE_NAME}.sh start >/dev/null 2>&1"
-		fi
 		if [ "$TOKEN_SET" = "1" ]; then
 			log "Starting the bot via rc.d..."
 			"$RCD_DIR/S99${SERVICE_NAME}.sh" start
