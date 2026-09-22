@@ -220,14 +220,26 @@ class Config:
     #  Прокси-словарь для requests
     # ------------------------------------------------------------------ #
     @property
+    def use_proxy(self) -> bool:
+        """Нужен ли прокси трекерам.
+
+        ``PROXY_URL=direct`` (или пусто, ``none``, ``off``) означает «ходить
+        к трекерам напрямую». Это бывает нужно, когда трекеры с этого NAS
+        доступны, а exit-IP прокси они банят (типично для датацентров).
+        """
+        return self.proxy_url.strip().lower() not in ("", "direct", "none", "off")
+
+    @property
     def proxies(self) -> Dict[str, str]:
-        """Словарь для параметра ``proxies=`` в requests.
+        """Словарь для параметра ``proxies=`` в requests ({} = без прокси).
 
         Единственное место в проекте, где прокси превращается в готовую
         структуру. ``socks5h`` означает: DNS-резолвинг выполняет прокси
         (OpenWrt), а не Xpenology — это важно и для приватности, и потому что
         rutracker/kinozal могут быть недоступны по DNS с Xpenology.
         """
+        if not self.use_proxy:
+            return {}
         return {"http": self.proxy_url, "https": self.proxy_url}
 
     def validate(self) -> Optional[str]:
@@ -235,7 +247,9 @@ class Config:
         if not self.telegram_token or self.telegram_token.startswith("123456:"):
             return "TELEGRAM_BOT_TOKEN не задан (см. .env.example)."
         if not self.proxy_url:
-            return "PROXY_URL не задан — трекеры будут недоступны."
+            return None  # direct — допустимо
+        if not self.use_proxy:
+            return None  # PROXY_URL=direct
         if not self.proxy_url.startswith(("socks5h://", "socks5://", "http://", "https://")):
             return (
                 "PROXY_URL должен начинаться с socks5h:// (рекомендуется), "

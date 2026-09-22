@@ -1017,8 +1017,13 @@ async def preflight() -> None:
     Не фатально: бот продолжает работу, но в логе сразу видно, что адрес/порт
     прокси указаны неверно - а не только по таймауту через минуту.
     """
-    parsed = urlparse(CONFIG.proxy_url)
-    if parsed.hostname and parsed.port:
+    if not CONFIG.use_proxy:
+        log.info("Трекеры ходят НАПРЯМУЮ (PROXY_URL=%s)", CONFIG.proxy_url or "пусто")
+        parsed = None
+    else:
+        parsed = urlparse(CONFIG.proxy_url)
+
+    if parsed is not None and parsed.hostname and parsed.port:
         if await to_thread(_tcp_check, parsed.hostname, parsed.port):
             log.info("Прокси трекеров доступен: %s", CONFIG.proxy_url)
         else:
