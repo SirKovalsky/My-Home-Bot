@@ -324,10 +324,10 @@ configure_env() {
 	ask_port "  Port (Transmission RPC port, default 9091)" \
 		"$(default_or TRANSMISSION_PORT 9091)"
 	set_env TRANSMISSION_PORT "$ANSWER"
-	ask "  RPC username (Enter if RPC auth is disabled)" \
+	ask "  RPC username (plain text; Enter if RPC auth is OFF)" \
 		"$(current_value TRANSMISSION_USER)"
 	set_env TRANSMISSION_USER "$ANSWER"
-	ask "  RPC password (Enter if RPC auth is disabled)" \
+	ask "  RPC password (plain text, NOT the {hash} in settings.json)" \
 		"$(current_value TRANSMISSION_PASSWORD)"
 	set_env TRANSMISSION_PASSWORD "$ANSWER"
 
