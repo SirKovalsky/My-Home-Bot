@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html as html_module
 import logging
+import os
 import pickle
 import re
 import time
@@ -59,6 +60,10 @@ else:
     _RequestError = requests.exceptions.RequestException
 
 log = logging.getLogger(__name__)
+
+# Какой браузер подделывать. Можно переопределить: CURL_IMPERSONATE=chrome124
+# (в curl_cffi 0.9.0 доступны chrome99..chrome131, safari18_0, firefox133).
+IMPERSONATE = os.getenv("CURL_IMPERSONATE", "chrome").strip() or "chrome"
 
 # Маркеры капчи/антибота, встречающиеся на rutracker/kinozal.
 CAPTCHA_MARKERS = (
@@ -193,9 +198,13 @@ class BaseTracker(ABC):
 
         if HAVE_CURL_CFFI:
             # >>> ЗДЕСЬ ЗАДАЁТСЯ ПРОКСИ <<< (та же явная структура, что и ниже)
+            #
+            # ВАЖНО: не подставляем свой User-Agent/Accept. Impersonate сам
+            # выставляет согласованный набор заголовков под выбранный браузер;
+            # если переопределить хотя бы UA, Cloudflare увидит расхождение
+            # «TLS от Chrome 131 — заголовки от Chrome 124» и снова даст челлендж.
             session = curl_requests.Session(
-                impersonate="chrome",
-                headers=headers,
+                impersonate=IMPERSONATE,
                 proxies=dict(self._proxies),
                 timeout=self._timeout,
                 trust_env=False,
