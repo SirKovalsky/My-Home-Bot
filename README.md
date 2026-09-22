@@ -252,14 +252,32 @@ python bot.py
 ### Роутинг по папкам
 | Переменная | Описание |
 |---|---|
-| `DOWNLOAD_DIR_DEFAULT` | папка «по умолчанию» |
-| `DOWNLOAD_DIR_SERIES` | папка для сериалов (напр. `/volume1/Downloads/Series`) |
-| `DOWNLOAD_DIR_FILMS` | папка для фильмов (напр. `/volume1/Downloads/Films`) |
-| `SERIES_KEYWORDS` | ключевые слова категории «сериалы» |
-| `FILMS_KEYWORDS` | ключевые слова категории «фильмы» |
+| `DOWNLOAD_DIR_MOVIES` | фильмы, в т.ч. полнометражные аниме и мультфильмы |
+| `DOWNLOAD_DIR_SERIES` | сериалы, в т.ч. мультипликационные и 3D |
+| `DOWNLOAD_DIR_ANIME` | только многосерийное аниме |
+| `DOWNLOAD_DIR_AUDIOBOOKS` | аудиокниги |
+| `DOWNLOAD_DIR_MUSIC` | музыка |
+| `DOWNLOAD_DIR_SOFT` | софт |
+| `DOWNLOAD_DIR_DEFAULT` | запасной путь, если категория не определена |
+| `CONFIRM_TTL` | сколько секунд торрент ждёт подтверждения папки |
 
-Категория определяется по имени торрента (из `.torrent`/magnet) в
-`utils/torrent_parser.py`. Ключевые слова можно менять без правки кода.
+Ключевые слова категорий (меняются без правки кода):
+
+| Переменная | Категория |
+|---|---|
+| `MOVIES_KEYWORDS` | фильмы / мультфильмы |
+| `SERIES_KEYWORDS` | сериалы |
+| `ANIME_KEYWORDS` | аниме |
+| `AUDIOBOOKS_KEYWORDS` | аудиокниги |
+| `MUSIC_KEYWORDS` | музыка |
+| `SOFT_KEYWORDS` | софт |
+| `EPISODE_MARKERS` | маркеры многосерийности (для отличия сериала/аниме от полнометражки) |
+
+**Бот не выбирает папку молча.** Он определяет категорию (`utils/torrent_parser.py`),
+показывает её как предложенную (⭐) и ждёт нажатия кнопки. Приоритет автоопределения:
+аудиокниги → музыка → софт → аниме → сериалы → фильмы → прочее. Для аниме логика
+такая: есть признаки сериальности (сезон/S01E02/диапазон серий) → `Anime`,
+иначе (полнометражное аниме) → `Movies`.
 
 ### Учётные данные трекеров
 | Переменная | Описание |
@@ -279,57 +297,94 @@ python bot.py
 
 ---
 
-## 4. Как узнать IP/порт SOCKS5 на OpenWrt
+## 4. Прокси на OpenWrt: SOCKS-inbound в xray + WireGuard
 
-Прокси на OpenWrt — это обычно **Shadowsocks-libev (`ss-local`)**, **v2ray/xray**,
-**trojan** или **redsocks/3proxy/privoxy** для HTTP. Задача: найти локальный
-SOCKS5-порт и **выставить прослушивание на LAN-адрес**, чтобы Xpenology мог
-подключиться по сети (а не только `127.0.0.1`).
+### 4.1. Почему «прозрачный» редирект xray сам по себе не подходит
 
-### 4.1. Найти порт
+У вас на OpenWrt запущен **xray-клиент**, который по своим правилам заворачивает
+трафик **своих клиентов** (тех, кто ходит через OpenWrt как шлюз) на удалённый
+сервер. Xpenology же стоит **за Keenetic, на одном уровне с OpenWrt**, и его шлюз
+по умолчанию — Keenetic, а не OpenWrt. Поэтому:
 
-```bash
-ssh root@192.168.1.2            # ваш OpenWrt
+- «прозрачные» правила xray (TPROXY/редирект) **трафик Xpenology не покрывают**;
+- чтобы трафик к трекерам всё-таки ушёл через туннель, бот **сам** подключается
+  к SOCKS5-инбаунду на OpenWrt — это и есть явный `proxies={...}`, как и требует
+  архитектура.
 
-# кто вообще слушает TCP
-netstat -lnpt                    # или: ss -lnpt
-# ждём строки вида 0.0.0.0:1080 / 127.0.0.1:1080 / 192.168.1.2:1080
+Значит, на OpenWrt нужно лишь **добавить SOCKS5-вход** в существующий xray.
+Никакого прозрачного проксирования, nftables-правил и реверс-туннелей не требуется.
 
-# конфиг Shadowsocks-libev
-uci show shadowsocks-libev
-cat /etc/config/shadowsocks-libev
-
-# если используется v2ray/xray — посмотрите inbound'ы
-cat /etc/xray/config.json 2>/dev/null | grep -A5 socks
-```
-
-Типичные порты: **1080** (Shadowsocks/`ss-local`), **1081**, **8118** (privoxy, HTTP),
-**3128**, **10808** (xray socks).
-
-### 4.2. Разрешить прослушивание на LAN
-
-Если прокси слушает только `127.0.0.1`, Xpenology его не увидит. Варианты:
-
-**Shadowsocks-libev** — задайте `local_address` (адрес прослушивания):
+### 4.2. Посмотреть текущий конфиг xray
 
 ```bash
-uci set shadowsocks-libev.@shadowsocks-libev[0].local_address='0.0.0.0'
-uci set shadowsocks-libev.@shadowsocks-libev[0].local_port='1080'
-uci commit shadowsocks-libev
-/etc/init.d/shadowsocks-libev restart
+ssh root@<IP_OpenWrt>
+
+# где лежит конфиг и что уже есть
+cat /etc/xray/config.json 2>/dev/null | head -60
+# типовые альтернативные пути:
+ls -l /etc/xray/ /etc/config/xray /usr/share/xray 2>/dev/null
+
+# какие outbound'ы заданы — запомните tag «проксирующего» outbound
+grep -n '"outbounds"' -A 20 /etc/xray/config.json
+
+# что уже слушает наружу
+netstat -lnpt | grep -E 'xray|v2ray'
 ```
 
-Либо запустить отдельный `ss-local`, слушающий LAN:
+### 4.3. Добавить SOCKS5-инбаунд
+
+В блок `inbounds` добавьте (или проверьте, нет ли уже) объект:
+
+```json
+{
+  "tag": "socks-lan",
+  "listen": "0.0.0.0",
+  "port": 1080,
+  "protocol": "socks",
+  "settings": {
+    "auth": "noauth",
+    "udp": false
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls"]
+  }
+}
+```
+
+`udp: false` — намеренно: боту нужны только HTTP(S)-запросы к трекерам,
+UDP-over-proxy ни к чему. `listen: 0.0.0.0` — чтобы вход был доступен с Xpenology
+по LAN. Если хотите строже — укажите вместо `0.0.0.0` конкретный LAN-адрес OpenWrt.
+
+**Важно про маршрутизацию.** Если в `routing.rules` у вас правила вида
+`"inboundTag": ["tproxy"]` (то есть проксируется только прозрачный вход), новый
+socks-вход может уехать в `direct`/`freedom`. Тогда добавьте правило:
+
+```json
+{
+  "type": "field",
+  "inboundTag": ["socks-lan"],
+  "outboundTag": "proxy"
+}
+```
+
+где `proxy` — **tag вашего существующего outbound'а**, который уходит на удалённый
+сервер (посмотрите его в `outbounds`, имена бывают `proxy`, `outbound`, `main`).
+Порядок правил важен: это правило должно стоять **до** возможного `direct`.
+
+Примените конфиг:
 
 ```bash
-ss-local -s <server> -p <port> -k <password> -m aes-256-gcm -b 0.0.0.0 -l 1080
+# проверьте конфиг, затем перезапустите (команда зависит от сборки)
+xray -test -config /etc/xray/config.json
+/etc/init.d/xray restart      # или: service xray restart / reboot
 ```
 
-**xray/v2ray** — в inbound'е `"listen": "0.0.0.0"`, `"protocol": "socks"`.
+### 4.4. Firewall
 
-**3proxy / dante** — в конфиге `socks -p1080 -i0.0.0.0` (для dante — `external:`).
-
-### 4.3. Открыть порт в firewall OpenWrt
+В дефолтной OpenWrt зона **lan** имеет `input ACCEPT`, поэтому отдельное правило
+обычно **не нужно** — Xpenology просто достучится до `<IP_OpenWrt>:1080`.
+Правило добавьте только если вы ужесточали firewall:
 
 ```bash
 uci add firewall rule
@@ -342,27 +397,37 @@ uci commit firewall
 /etc/init.d/firewall restart
 ```
 
-### 4.4. Проверить с Xpenology (через прокси)
+### 4.5. WireGuard-сервер — не для бота
+
+Поднятый на OpenWrt **WireGuard-сервер** нужен для доступа в домашнюю сеть
+извне, и к маршрутизации трекер-трафика отношения не имеет. Не направляйте
+`PROXY_URL` на WireGuard: боту нужен именно SOCKS5 к выходному узлу. P2P-трафик
+Transmission и так идёт напрямую и в туннель не попадает.
+
+### 4.6. Проверка с Xpenology
 
 ```bash
-# TCP-доступность
-nc -vz 192.168.1.2 1080
+# TCP-доступность входа
+nc -vz <IP_OpenWrt> 1080
 
-# запрос через SOCKS5 — должен вернуть внешний IP прокси
-curl -x socks5h://192.168.1.2:1080 https://api.ipify.org; echo
+# запрос через SOCKS5 — должен вернуть внешний IP удалённого сервера, а не ваш
+curl -x socks5h://<IP_OpenWrt>:1080 https://api.ipify.org; echo
+
+# а прямой запрос — IP провайдера
+curl https://api.ipify.org; echo
 ```
 
-Если `curl -x socks5h://...` выдаёт ваш прокси-IP, а без `-x` — IP провайдера,
-всё настроено правильно. В `.env` пишите ровно:
+Если через `-x` видите IP удалённого сервера, а без него — свой провайдерский,
+всё настроено верно. В `.env` пишите ровно:
 
 ```env
-PROXY_URL=socks5h://192.168.1.2:1080
+PROXY_URL=socks5h://<IP_OpenWrt>:1080
 ```
 
 > **Почему `socks5h`, а не `socks5`?** `h` = DNS через прокси. Тогда имена
-> `rutracker.org`/`kinozal.me` резолвит OpenWrt. Это важно, потому что с
-> Xpenology эти домены могут не резолвиться/блокироваться, а на прокси-стороне
-> резолв корректный.
+> `rutracker.org`/`kinozal.me` резолвит сторона прокси. Это важно, потому что
+> с Xpenology эти домены могут не резолвиться/блокироваться, а на стороне
+> туннеля резолв корректный.
 
 ---
 
@@ -438,19 +503,22 @@ PY
 | `/login_kinozal` | то же для kinozal |
 | `/status` | активные загрузки Transmission |
 | `/stats` | суммарные скорости и количество |
+| `/dirs` | список папок загрузки по категориям |
 
 Приём сообщений:
 
-- **magnet-ссылка** текстом → сразу в Transmission;
-- **`.torrent` документом** → сразу в Transmission;
+- **magnet-ссылка** текстом → бот предлагает папку;
+- **`.torrent` документом** → бот предлагает папку;
 - **ссылка на страницу** `rutracker.org/forum/viewtopic.php?t=...` или
   `kinozal.me/details.php?id=...` → бот парсит страницу **через прокси**,
-  находит `.torrent`/magnet, скачивает `.torrent` **через прокси** и отдаёт в
-  Transmission **напрямую**.
+  находит `.torrent`/magnet, скачивает `.torrent` **через прокси**, затем
+  предлагает папку.
 
-Роутинг папок: по ключевым словам в имени торрента выбирается
-`DOWNLOAD_DIR_SERIES` / `DOWNLOAD_DIR_FILMS` / `DOWNLOAD_DIR_DEFAULT`, значение
-уходит в RPC как `download-dir`.
+**Подтверждение папки.** Бот определяет категорию сам, помечает её звёздочкой ⭐
+и показывает inline-клавиатуру из шести папок. В Transmission торрент уходит
+только после нажатия кнопки; значение передаётся в RPC как `download-dir`.
+Есть кнопка «❌ Отмена». Если категорию определить не удалось — звёздочки нет,
+папку выбираете вручную. Неподтверждённые запросы живут `CONFIRM_TTL` секунд.
 
 Уведомления: сообщение при добавлении и отдельное — при завершении загрузки.
 

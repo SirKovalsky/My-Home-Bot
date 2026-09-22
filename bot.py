@@ -6,13 +6,19 @@
 
     Прокси используется ИСКЛЮЧИТЕЛЬНО внутри ``trackers/*`` (явный параметр
     ``proxies=``). Клиент Transmission прокси не использует никогда.
+
+Выбор папки: бот определяет категорию автоматически, но НЕ применяет её молча —
+он предлагает вариант кнопкой и ждёт подтверждения пользователя.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import sys
+import time
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Optional, Set
 
@@ -20,7 +26,12 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 import config as config_module
 from config import CONFIG
@@ -40,7 +51,7 @@ log = logging.getLogger("torrent-bot")
 
 router = Router()
 
-# Клиенты создаются лениво/один раз.
+# Клиенты создаются один раз.
 transmission = TransmissionClient(CONFIG)
 
 trackers: Dict[str, BaseTracker] = {
@@ -60,6 +71,34 @@ trackers: Dict[str, BaseTracker] = {
 
 # Чаты для уведомлений о завершении загрузки.
 known_chats: Set[int] = set()
+
+
+# --------------------------------------------------------------------------- #
+#  Ожидающие подтверждения торренты
+# --------------------------------------------------------------------------- #
+@dataclass
+class PendingTorrent:
+    """Торрент, который ждёт, пока пользователь выберет папку."""
+
+    token: str
+    user_id: int
+    name: str
+    suggested: str
+    magnet: Optional[str] = None
+    torrent_bytes: Optional[bytes] = None
+    source: str = ""
+    created: float = 0.0
+
+
+PENDING: Dict[str, PendingTorrent] = {}
+
+
+def _prune_pending() -> None:
+    ttl = CONFIG.confirm_ttl
+    now = time.time()
+    expired = [tok for tok, item in PENDING.items() if now - item.created > ttl]
+    for tok in expired:
+        PENDING.pop(tok, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -91,11 +130,15 @@ def setup_logging() -> None:
 # --------------------------------------------------------------------------- #
 #  Доступ
 # --------------------------------------------------------------------------- #
-def is_allowed(message: Message) -> bool:
+def _user_allowed(user_id: Optional[int]) -> bool:
     allowed: List[int] = CONFIG.allowed_user_ids
     if not allowed:
         return True
-    return bool(message.from_user and message.from_user.id in allowed)
+    return user_id is not None and user_id in allowed
+
+
+def is_allowed(message: Message) -> bool:
+    return _user_allowed(message.from_user.id if message.from_user else None)
 
 
 async def deny(message: Message) -> None:
@@ -118,15 +161,17 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "🤖 <b>Torrent Bot</b>\n\n"
         "Отправьте мне:\n"
-        "• magnet-ссылку — сразу добавлю в Transmission;\n"
-        "• <code>.torrent</code> файл — сразу добавлю;\n"
+        "• magnet-ссылку — сразу предложу папку;\n"
+        "• <code>.torrent</code> файл — сразу предложу папку;\n"
         "• ссылку на раздачу rutracker.org / kinozal.me — скачаю .torrent "
-        "через прокси и добавлю.\n\n"
+        "через прокси.\n\n"
+        "<b>Папку загрузки подтверждаете вы</b> — бот только предлагает вариант.\n\n"
         "<b>Команды:</b>\n"
         "/login_rutracker — обновить сессию rutracker\n"
         "/login_kinozal — обновить сессию kinozal\n"
         "/status — активные загрузки\n"
         "/stats — суммарная статистика\n"
+        "/dirs — показать список папок\n"
         "/help — эта справка\n\n"
         f"<i>Прокси для трекеров:</i> <code>{CONFIG.proxy_url}</code>\n"
         f"<i>Transmission:</i> <code>{CONFIG.transmission_host}:"
@@ -137,6 +182,17 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await cmd_start(message)
+
+
+@router.message(Command("dirs"))
+async def cmd_dirs(message: Message) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+    lines = ["📂 <b>Папки загрузки</b>", ""]
+    for cat, label, path in torrent_parser.category_choices():
+        lines.append(f"{label}: <code>{path}</code>")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("login_rutracker"))
@@ -227,7 +283,7 @@ async def cmd_stats(message: Message) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Приём magnet / ссылок
+#  Приём magnet / ссылок / файлов
 # --------------------------------------------------------------------------- #
 @router.message(F.text)
 async def on_text(message: Message) -> None:
@@ -240,7 +296,9 @@ async def on_text(message: Message) -> None:
         return
 
     if torrent_parser.is_magnet(text):
-        await add_to_transmission(message, name=torrent_parser.magnet_name(text), magnet=text)
+        await propose_folder(
+            message, name=torrent_parser.magnet_name(text), magnet=text
+        )
         return
 
     tracker_name = detect_tracker(text)
@@ -276,8 +334,7 @@ async def on_document(message: Message) -> None:
         return await status.edit_text(f"❌ Не удалось получить файл: {exc}")
 
     name = torrent_parser.guess_title(raw, fallback=filename)
-    await status.edit_text("⏳ Отправляю в Transmission...")
-    await add_to_transmission(message, name=name, torrent_bytes=raw, status_message=status)
+    await propose_folder(message, name=name, torrent_bytes=raw, status_message=status)
 
 
 def detect_tracker(url: str) -> Optional[str]:
@@ -312,8 +369,7 @@ async def process_tracker_url(message: Message, tracker_name: str, url: str) -> 
         log.exception("Ошибка разбора страницы трекера")
         return await status.edit_text(f"💥 Внутренняя ошибка: {exc}")
 
-    await status.edit_text("⏳ Передаю в Transmission (локально, без прокси)...")
-    await add_to_transmission(
+    await propose_folder(
         message,
         name=result.name or f"{tracker_name}_download",
         magnet=result.magnet,
@@ -324,9 +380,9 @@ async def process_tracker_url(message: Message, tracker_name: str, url: str) -> 
 
 
 # --------------------------------------------------------------------------- #
-#  Добавление в Transmission
+#  Предложение папки (вместо автоматического выбора)
 # --------------------------------------------------------------------------- #
-async def add_to_transmission(
+async def propose_folder(
     message: Message,
     *,
     name: str,
@@ -335,48 +391,150 @@ async def add_to_transmission(
     source: str = "",
     status_message: Optional[Message] = None,
 ) -> None:
-    category = torrent_parser.detect_category(name)
-    download_dir = torrent_parser.resolve_download_dir(category)
+    _prune_pending()
 
+    suggested = torrent_parser.detect_category(name)
+    token = secrets.token_urlsafe(8)
+    PENDING[token] = PendingTorrent(
+        token=token,
+        user_id=message.from_user.id if message.from_user else 0,
+        name=name,
+        suggested=suggested,
+        magnet=magnet,
+        torrent_bytes=torrent_bytes,
+        source=source,
+        created=time.time(),
+    )
+
+    suggested_dir = torrent_parser.resolve_download_dir(suggested)
+    if suggested == config_module.CATEGORY_OTHER:
+        hint = "🤔 <i>Категорию определить не удалось — выберите папку вручную.</i>"
+    else:
+        hint = (
+            f"Предлагаю: <b>{torrent_parser.category_label(suggested)}</b> "
+            f"(⭐)\n<code>{suggested_dir}</code>"
+        )
+
+    text = (
+        "🎯 <b>Куда сохранить?</b>\n\n"
+        f"<b>{_escape(name)}</b>\n\n"
+        f"{hint}\n\n"
+        "Подтвердите кнопкой ниже или выберите другую папку."
+    )
+    markup = _build_folder_keyboard(token, suggested)
+    await _respond(message, status_message, text, reply_markup=markup)
+
+
+def _build_folder_keyboard(token: str, suggested: str) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for cat, label, _path in torrent_parser.category_choices():
+        prefix = "⭐ " if cat == suggested else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{prefix}{label}", callback_data=f"dl|{cat}|{token}"
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel|{token}")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("dl|"))
+async def on_folder_chosen(callback: CallbackQuery) -> None:
+    if not _user_allowed(callback.from_user.id):
+        return await callback.answer("⛔ Нет доступа", show_alert=True)
+
+    try:
+        _, category, token = (callback.data or "").split("|", 2)
+    except ValueError:
+        return await callback.answer("Некорректные данные", show_alert=True)
+
+    pending = PENDING.get(token)
+    if not pending:
+        return await callback.answer(
+            "⌛️ Запрос устарел, пришлите торрент заново.", show_alert=True
+        )
+    if pending.user_id != callback.from_user.id:
+        return await callback.answer("Это не ваш торрент.", show_alert=True)
+
+    # Забираем из очереди сразу, чтобы двойной клик не добавил дважды.
+    PENDING.pop(token, None)
+    await callback.answer("Добавляю...")
+
+    download_dir = torrent_parser.resolve_download_dir(category)
     try:
         info = await asyncio.to_thread(
             transmission.add_torrent,
-            torrent_bytes=torrent_bytes,
-            magnet=magnet,
+            torrent_bytes=pending.torrent_bytes,
+            magnet=pending.magnet,
             download_dir=download_dir,
         )
     except TransmissionUnavailable as exc:
-        text = f"⚠️ Transmission недоступен: {exc}"
-        return await _respond(message, status_message, text)
+        return await _edit(callback, f"⚠️ Transmission недоступен: {exc}")
     except Exception as exc:  # noqa: BLE001
         log.exception("Ошибка добавления торрента")
-        return await _respond(message, status_message, f"💥 Ошибка добавления: {exc}")
-
-    category_label = {
-        config_module.CATEGORY_SERIES: "сериалы",
-        config_module.CATEGORY_FILMS: "фильмы",
-        config_module.CATEGORY_OTHER: "прочее",
-    }.get(category, category)
+        return await _edit(callback, f"💥 Ошибка добавления: {exc}")
 
     lines = [
         "✅ <b>Добавлено в Transmission</b>",
-        f"Название: <b>{_escape(info.name or name)}</b>",
-        f"Категория: <b>{category_label}</b>",
+        f"Название: <b>{_escape(info.name or pending.name)}</b>",
+        f"Категория: <b>{torrent_parser.category_label(category)}</b>",
         f"Папка: <code>{download_dir}</code>",
     ]
-    if source:
-        lines.append(f"Источник: {_escape(source)}")
-    await _respond(message, status_message, "\n".join(lines))
+    if pending.source:
+        lines.append(f"Источник: {_escape(pending.source)}")
+    await _edit(callback, "\n".join(lines))
 
 
-async def _respond(message: Message, status_message: Optional[Message], text: str) -> None:
+@router.callback_query(F.data.startswith("cancel|"))
+async def on_cancel(callback: CallbackQuery) -> None:
+    if not _user_allowed(callback.from_user.id):
+        return await callback.answer("⛔ Нет доступа", show_alert=True)
+
+    parts = (callback.data or "cancel|").split("|", 1)
+    token = parts[1] if len(parts) > 1 else ""
+    pending = PENDING.pop(token, None)
+    if pending is None:
+        return await callback.answer("Уже отменено.")
+    await callback.answer("Отменено.")
+    await _edit(callback, "🚫 Отменено — торрент не добавлен.")
+
+
+# --------------------------------------------------------------------------- #
+#  Вспомогательное
+# --------------------------------------------------------------------------- #
+async def _respond(
+    message: Message,
+    status_message: Optional[Message],
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
     if status_message is not None:
         try:
-            await status_message.edit_text(text)
+            await status_message.edit_text(text, reply_markup=reply_markup)
             return
         except Exception:  # noqa: BLE001
             pass
-    await message.answer(text)
+    await message.answer(text, reply_markup=reply_markup)
+
+
+async def _edit(callback: CallbackQuery, text: str) -> None:
+    if not callback.message:
+        return
+    try:
+        await callback.message.edit_text(text)
+    except Exception:  # noqa: BLE001
+        try:
+            await callback.message.answer(text)
+        except Exception:  # noqa: BLE001
+            log.warning("Не удалось отредактировать сообщение с выбором папки")
 
 
 # --------------------------------------------------------------------------- #
@@ -387,11 +545,10 @@ class CompletionNotifier:
 
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
-        self._seen: Dict[int, str] = {}       # id -> name
-        self._notified: Set[int] = set()      # id уже уведомлённых
+        self._seen: Dict[int, str] = {}
+        self._notified: Set[int] = set()
 
     async def run(self) -> None:
-        # Первичный снимок: не уведомляем о том, что уже было завершено.
         await self._prime()
         while True:
             await asyncio.sleep(CONFIG.poll_interval)
@@ -420,7 +577,6 @@ class CompletionNotifier:
             return
 
         current_ids = {t.id for t in torrents}
-        # Забываем удалённые торренты, чтобы не уведомлять повторно при новом id.
         self._notified &= current_ids
         self._seen = {t.id: t.name for t in torrents}
 

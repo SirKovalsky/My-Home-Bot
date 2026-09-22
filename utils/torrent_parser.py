@@ -1,6 +1,10 @@
-"""Разбор торрентов и определение категории / папки загрузки.
+"""Разбор торрентов, определение категории и предложение папки загрузки.
 
 Здесь нет никакой сети — только работа с текстом и `.torrent`-байтами.
+
+ВАЖНО про категории: функция :func:`detect_category` — это лишь *догадка*.
+Бот показывает её пользователю как подсказку, но окончательный выбор папки
+всегда подтверждает человек (см. ``bot.py``, inline-клавиатура).
 """
 
 from __future__ import annotations
@@ -12,9 +16,117 @@ import config
 
 MAGNET_RE = re.compile(r"^magnet:\?", re.IGNORECASE)
 
-# --- Очень компактный bencode-парсер (достаточно для 'name'/'announce') --- #
+# --------------------------------------------------------------------------- #
+#  Маркеры «сериальности»
+# --------------------------------------------------------------------------- #
+# S01, S01E02, s1e2
+SEASON_EP_RE = re.compile(r"\b[sS]\d{1,2}(\s?[eE]\d{1,3})?\b")
+# отдельный E01 / E12
+EP_ONLY_RE = re.compile(r"\b[eE]\d{1,3}\b")
+# диапазон серий 01-12 / 1-24 (годы 2020-2021 под шаблон не попадают)
+EPISODE_RANGE_RE = re.compile(r"\b\d{1,2}\s?-\s?\d{1,3}\b")
 
 
+def has_episode_markers(text: str) -> bool:
+    """Есть ли в имени торрента признаки многосерийности."""
+    haystack = (text or "").lower()
+    if not haystack:
+        return False
+    if SEASON_EP_RE.search(haystack):
+        return True
+    if EP_ONLY_RE.search(haystack):
+        return True
+    if EPISODE_RANGE_RE.search(haystack):
+        return True
+    return _match_keywords(haystack, config.EPISODE_MARKERS)
+
+
+# --------------------------------------------------------------------------- #
+#  Категории
+# --------------------------------------------------------------------------- #
+def detect_category(text: str) -> str:
+    """Определяет наиболее вероятную категорию по имени/описанию торрента.
+
+    Приоритет: аудиокниги → музыка → софт → (аниме) → сериалы → фильмы → прочее.
+
+    Логика для разных типов аниме (из требований):
+      * аниме + признаки сериальности  -> Anime  (многосерийное аниме);
+      * аниме без признаков сериальности -> Movies (полнометражное аниме);
+      * сериалы (в т.ч. мультипликационные и 3D) -> Series.
+    """
+    haystack = (text or "").lower()
+    if not haystack:
+        return config.CATEGORY_OTHER
+
+    if _match_keywords(haystack, config.AUDIOBOOKS_KEYWORDS):
+        return config.CATEGORY_AUDIOBOOKS
+
+    if _match_keywords(haystack, config.MUSIC_KEYWORDS):
+        return config.CATEGORY_MUSIC
+
+    if _match_keywords(haystack, config.SOFT_KEYWORDS):
+        return config.CATEGORY_SOFT
+
+    is_anime = _match_keywords(haystack, config.ANIME_KEYWORDS)
+    episodic = has_episode_markers(haystack)
+
+    if is_anime:
+        # Многосерийное аниме -> Anime, полнометражное -> Movies.
+        return config.CATEGORY_ANIME if episodic else config.CATEGORY_MOVIES
+
+    if episodic or _match_keywords(haystack, config.SERIES_KEYWORDS):
+        return config.CATEGORY_SERIES
+
+    if _match_keywords(haystack, config.MOVIES_KEYWORDS):
+        return config.CATEGORY_MOVIES
+
+    return config.CATEGORY_OTHER
+
+
+def _match_keywords(haystack: str, keywords: List[str]) -> bool:
+    """Ищет ключевые слова.
+
+    Для коротких ASCII-токенов (mp3, ost, flac, film...) требуем границы слова,
+    чтобы «ost» не срабатывал внутри «most»/«poster». Для длинных и для
+    кириллицы достаточно подстроки («кино» -> «кинофильм»).
+    """
+    for keyword in keywords:
+        if not keyword:
+            continue
+        if keyword.isascii() and keyword.isalnum() and len(keyword) <= 5:
+            if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", haystack):
+                return True
+            continue
+        if keyword in haystack:
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+#  Пути загрузки
+# --------------------------------------------------------------------------- #
+def category_label(category: str) -> str:
+    return config.CATEGORY_LABELS.get(category, category)
+
+
+def resolve_download_dir(category: str, override: Optional[str] = None) -> str:
+    """Папка загрузки для категории (с возможностью явного переопределения)."""
+    if override:
+        return override
+    return config.CONFIG.download_dir_for(category)
+
+
+def category_choices() -> List[Tuple[str, str, str]]:
+    """Список (category, label, path) для клавиатуры выбора."""
+    return [
+        (cat, category_label(cat), config.CONFIG.download_dir_for(cat))
+        for cat in config.CATEGORY_ORDER
+    ]
+
+
+# --------------------------------------------------------------------------- #
+#  Работа с .torrent (bencode)
+# --------------------------------------------------------------------------- #
 def _bdecode(data: bytes, index: int = 0):
     """Минимальный bencode-декодер.
 
@@ -57,19 +169,21 @@ def _bdecode(data: bytes, index: int = 0):
 
 
 def parse_torrent_bytes(raw: bytes) -> Dict:
-    """Парсит .torrent и возвращает info-dict (best effort, без падений)."""
+    """Парсит .torrent и возвращает метаданные (best effort, без падений)."""
     try:
         decoded, _ = _bdecode(raw)
     except Exception:
         return {}
 
-    info = decoded.get(b"info", {}) if isinstance(decoded, dict) else {}
-    result = {
-        "announce": _to_str(decoded.get(b"announce", b"")) if isinstance(decoded, dict) else "",
+    if not isinstance(decoded, dict):
+        return {}
+
+    info = decoded.get(b"info", {})
+    return {
+        "announce": _to_str(decoded.get(b"announce", b"")),
         "name": _to_str(info.get(b"name", b"")) if isinstance(info, dict) else "",
-        "comment": _to_str(decoded.get(b"comment", b"")) if isinstance(decoded, dict) else "",
+        "comment": _to_str(decoded.get(b"comment", b"")),
     }
-    return result
 
 
 def _to_str(value) -> str:
@@ -85,43 +199,6 @@ def is_torrent_bytes(raw: bytes) -> bool:
 
 def is_magnet(text: str) -> bool:
     return bool(MAGNET_RE.match(text.strip()))
-
-
-# --------------------------------------------------------------------------- #
-#  Категории
-# --------------------------------------------------------------------------- #
-def detect_category(text: str) -> str:
-    """Определяет категорию по ключевым словам в имени/описании.
-
-    Возвращает config.CATEGORY_SERIES / CATEGORY_FILMS / config.CATEGORY_OTHER.
-    Сначала проверяются сериалы (более специфичные маркеры), потом фильмы.
-    """
-    haystack = (text or "").lower()
-
-    if _match_keywords(haystack, config.SERIES_KEYWORDS):
-        return config.CATEGORY_SERIES
-    if _match_keywords(haystack, config.FILMS_KEYWORDS):
-        return config.CATEGORY_FILMS
-    return config.CATEGORY_OTHER
-
-
-def _match_keywords(haystack: str, keywords: List[str]) -> bool:
-    """Ищет ключевые слова как отдельные токены/подстроки.
-
-    Границы слова для латиницы (s0 -> "s01e02") проверяются вручную: короткие
-    маркеры вроде ``s0`` должны совпадать с ``s01``, а не внутри случайного слова.
-    """
-    for keyword in keywords:
-        if not keyword:
-            continue
-        # Короткие технические маркеры (s0, s0e) матчим как префикс сезона.
-        if re.fullmatch(r"s\d+e?", keyword):
-            if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}", haystack):
-                return True
-            continue
-        if keyword in haystack:
-            return True
-    return False
 
 
 def magnet_name(magnet: str) -> str:
@@ -140,15 +217,10 @@ def guess_title(raw: bytes, fallback: str = "") -> str:
     return meta.get("name") or fallback
 
 
-def resolve_download_dir(category: str, override: Optional[str] = None) -> str:
-    """Папка загрузки для категории (с возможностью явного переопределения)."""
-    if override:
-        return override
-    return config.CONFIG.download_dir_for(category)
-
-
+# --------------------------------------------------------------------------- #
+#  Форматирование
+# --------------------------------------------------------------------------- #
 def human_size(num_bytes: float) -> str:
-    """Человекочитаемый размер."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(num_bytes) < 1024.0:
             return f"{num_bytes:3.1f} {unit}"
@@ -158,9 +230,3 @@ def human_size(num_bytes: float) -> str:
 
 def human_speed(bytes_per_sec: float) -> str:
     return f"{human_size(bytes_per_sec)}/s"
-
-
-def split_categories(text: str) -> Tuple[str, str]:
-    """Совместимость: возвращает (категория, папка)."""
-    category = detect_category(text)
-    return category, resolve_download_dir(category)

@@ -59,18 +59,68 @@ def _abs(path: str) -> Path:
 # --------------------------------------------------------------------------- #
 #  Категории и роутинг по папкам
 # --------------------------------------------------------------------------- #
+CATEGORY_MOVIES = "movies"
 CATEGORY_SERIES = "series"
-CATEGORY_FILMS = "films"
+CATEGORY_ANIME = "anime"
+CATEGORY_AUDIOBOOKS = "audiobooks"
+CATEGORY_MUSIC = "music"
+CATEGORY_SOFT = "soft"
 CATEGORY_OTHER = "other"
 
-# Ключевые слова для автоопределения категории (по имени торрента / magnet dn=).
+# Порядок кнопок в Telegram и человекочитаемые подписи.
+CATEGORY_ORDER: List[str] = [
+    CATEGORY_MOVIES,
+    CATEGORY_SERIES,
+    CATEGORY_ANIME,
+    CATEGORY_AUDIOBOOKS,
+    CATEGORY_MUSIC,
+    CATEGORY_SOFT,
+]
+
+CATEGORY_LABELS: Dict[str, str] = {
+    CATEGORY_MOVIES: "🎬 Фильмы",
+    CATEGORY_SERIES: "📺 Сериалы",
+    CATEGORY_ANIME: "🌸 Аниме",
+    CATEGORY_AUDIOBOOKS: "🎧 Аудиокниги",
+    CATEGORY_MUSIC: "🎵 Музыка",
+    CATEGORY_SOFT: "💾 Софт",
+    CATEGORY_OTHER: "📁 Прочее",
+}
+
+# Ключевые слова категорий (можно переопределить в .env, через запятую).
+MOVIES_KEYWORDS: List[str] = _get_list(
+    "MOVIES_KEYWORDS",
+    "фильм,фильмы,кино,movie,movies,film,films,мультфильм,мультфильмы,"
+    "полнометражный,полнометражка,полнометражное,cartoon,blu-ray,bdremux",
+)
 SERIES_KEYWORDS: List[str] = _get_list(
     "SERIES_KEYWORDS",
-    "сериал,сериалы,сезон,season,s0,s0e,serial,tv-shows,tvshow",
+    "сериал,сериалы,сезон,season,серии,серия,эпизод,episode,tv-shows,tvshow,дорама",
 )
-FILMS_KEYWORDS: List[str] = _get_list(
-    "FILMS_KEYWORDS",
-    "фильм,фильмы,кино,movie,movies,film,films",
+# Многосерийное аниме. Для полнометражного аниме/мультфильмов путь — Movies.
+ANIME_KEYWORDS: List[str] = _get_list(
+    "ANIME_KEYWORDS",
+    "аниме,anime,аниме-сериал,анимесериал,ova,ona,аниме-сезон,"
+    "anilibria,anidub,animedia,anistar,animevost,kansai,kraken,studioband,jisedai,amik",
+)
+AUDIOBOOKS_KEYWORDS: List[str] = _get_list(
+    "AUDIOBOOKS_KEYWORDS",
+    "аудиокнига,аудиокниги,аудиокниг,audiobook,audiobooks,аудиоспектакль,аудиосериал",
+)
+MUSIC_KEYWORDS: List[str] = _get_list(
+    "MUSIC_KEYWORDS",
+    "flac,mp3,lossless,discography,дискография,саундтрек,soundtrack,ost,альбом,album,музыка,music",
+)
+SOFT_KEYWORDS: List[str] = _get_list(
+    "SOFT_KEYWORDS",
+    "софт,software,программа,программы,portable,keygen,кряк,crack,активатор,"
+    "лицензия,windows,office,adobe,macos,driver,драйвер,антивирус,antivirus",
+)
+
+# Маркеры сериальности в имени торрента.
+EPISODE_MARKERS: List[str] = _get_list(
+    "EPISODE_MARKERS",
+    "сезон,season,серии,серия,эпизод,episode,выпуск",
 )
 
 
@@ -97,10 +147,17 @@ class Config:
     transmission_protocol: str = _get("TRANSMISSION_PROTOCOL", "http")
     transmission_timeout: int = _get_int("TRANSMISSION_TIMEOUT", 30)
 
-    # --- Папки загрузки ---
-    download_dir_default: str = _get("DOWNLOAD_DIR_DEFAULT", "/volume1/Downloads/Other")
-    download_dir_series: str = _get("DOWNLOAD_DIR_SERIES", "/volume1/Downloads/Series")
-    download_dir_films: str = _get("DOWNLOAD_DIR_FILMS", "/volume1/Downloads/Films")
+    # --- Папки загрузки (роутинг по категориям) ---
+    download_dir_movies: str = _get("DOWNLOAD_DIR_MOVIES", "/volume2/downloads2/Movies")
+    download_dir_series: str = _get("DOWNLOAD_DIR_SERIES", "/volume2/downloads2/Series")
+    download_dir_anime: str = _get("DOWNLOAD_DIR_ANIME", "/volume2/downloads2/Anime")
+    download_dir_audiobooks: str = _get(
+        "DOWNLOAD_DIR_AUDIOBOOKS", "/volume2/downloads2/Audiobooks"
+    )
+    download_dir_music: str = _get("DOWNLOAD_DIR_MUSIC", "/volume2/downloads2/Music")
+    download_dir_soft: str = _get("DOWNLOAD_DIR_SOFT", "/volume2/downloads2/Soft")
+    # Куда класть, если категорию определить не удалось и пользователь выбрал «прочее».
+    download_dir_default: str = _get("DOWNLOAD_DIR_DEFAULT", "/volume2/downloads2/Movies")
 
     # --- Трекеры ---
     rutracker_login: str = _get("RUTRACKER_LOGIN")
@@ -118,6 +175,9 @@ class Config:
     poll_interval: int = _get_int("POLL_INTERVAL", 15)
     notify_on_complete: bool = _get_bool("NOTIFY_ON_COMPLETE", True)
 
+    # Сколько секунд ждать подтверждения выбора папки.
+    confirm_ttl: int = _get_int("CONFIRM_TTL", 3600)
+
     user_agent: str = _get(
         "USER_AGENT",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -130,9 +190,13 @@ class Config:
     @property
     def download_dirs(self) -> Dict[str, str]:
         return {
-            CATEGORY_OTHER: self.download_dir_default,
+            CATEGORY_MOVIES: self.download_dir_movies,
             CATEGORY_SERIES: self.download_dir_series,
-            CATEGORY_FILMS: self.download_dir_films,
+            CATEGORY_ANIME: self.download_dir_anime,
+            CATEGORY_AUDIOBOOKS: self.download_dir_audiobooks,
+            CATEGORY_MUSIC: self.download_dir_music,
+            CATEGORY_SOFT: self.download_dir_soft,
+            CATEGORY_OTHER: self.download_dir_default,
         }
 
     def download_dir_for(self, category: str) -> str:
