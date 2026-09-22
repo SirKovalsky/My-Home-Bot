@@ -148,6 +148,19 @@ journalctl -u torrent-bot -f
 sudo systemctl restart torrent-bot
 ```
 
+На DSM 6.x `install.sh` дополнительно ставит **cron-watchdog**: каждые 5 минут
+запускается `S99torrent-bot.sh start`, который сначала проверяет pid — если бот
+жив, ничего не происходит, если упал — поднимается. Проверить и отключить:
+
+```bash
+crontab -l | grep torrent-bot            # посмотреть задание
+crontab -l | grep -v torrent-bot | crontab -   # убрать watchdog
+sudo WITH_CRON=0 sh deploy/install.sh    # переустановить без watchdog
+```
+
+Ранние трейсбеки (до инициализации логгера) попадают в `torrent-bot.out`,
+сам лог бота — в `torrent-bot.log`.
+
 **Обновление версии:**
 
 ```bash
@@ -192,11 +205,15 @@ $PY -m virtualenv .venv
 ```bash
 #!/bin/sh
 cd /volume1/My-Home-Bot
-exec ./.venv/bin/python bot.py >> /volume1/My-Home-Bot/torrent-bot.log 2>&1
+exec ./.venv/bin/python bot.py >> /volume1/My-Home-Bot/torrent-bot.out 2>&1
 ```
 
-Минус: нет автоперезапуска при падении — стабильнее использовать rc.d-скрипт
-из `install.sh` или systemd-юнит.
+> Почему `torrent-bot.out`, а не `torrent-bot.log`: бот сам пишет лог в файл
+> (`LOG_FILE` в `.env`). Если перенаправить stdout ещё и туда же, каждая строка
+> попадёт в файл дважды. `.out` собирает только stderr и ранние трейсбеки.
+
+Минус Task Scheduler: нет автоперезапуска при падении. Стабильнее — rc.d-скрипт
+из `install.sh` (он же ставит cron-watchdog) или systemd-юнит.
 
 ### 2.4. Настройка Transmission RPC на DSM (перед первым запуском бота)
 

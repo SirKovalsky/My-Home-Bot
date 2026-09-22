@@ -399,7 +399,9 @@ install_rcd() {
 
 BOT_DIR="$INSTALL_DIR"
 PIDFILE="\$BOT_DIR/.torrent-bot.pid"
-LOGFILE="\$BOT_DIR/torrent-bot.log"
+# The bot writes its own log file (LOG_FILE in .env). This file only catches
+# stderr / early tracebacks, so the same lines are not written twice.
+OUTFILE="\$BOT_DIR/torrent-bot.out"
 
 is_running() {
 	[ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" 2>/dev/null
@@ -412,7 +414,7 @@ start_bot() {
 	fi
 	cd "\$BOT_DIR" || exit 1
 	PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 LC_ALL=C.UTF-8 \\
-		nohup "\$BOT_DIR/.venv/bin/python" "\$BOT_DIR/bot.py" >> "\$LOGFILE" 2>&1 &
+		nohup "\$BOT_DIR/.venv/bin/python" "\$BOT_DIR/bot.py" >> "\$OUTFILE" 2>&1 &
 	echo \$! > "\$PIDFILE"
 	echo "torrent-bot started (pid \$(cat "\$PIDFILE"))"
 }
@@ -439,6 +441,34 @@ EOF
 
 	chmod +x "$RCD_SCRIPT"
 	log "rc.d script installed: $RCD_SCRIPT"
+	return 0
+}
+
+# Keep the bot alive without systemd: a cron job runs "start" every 5 minutes.
+# The rc.d script's start is idempotent (it checks the pidfile first), so a
+# healthy bot is left alone. Disable with WITH_CRON=0.
+install_cron() {
+	[ "${WITH_CRON:-1}" = "1" ] || { log "cron watchdog disabled (WITH_CRON=0)"; return 0; }
+	command -v crontab >/dev/null 2>&1 || return 1
+	[ -n "${RCD_SCRIPT:-}" ] || return 1
+
+	MARK="# torrent-bot-watchdog"
+	LINE="*/5 * * * * $RCD_SCRIPT start >/dev/null 2>&1 $MARK"
+
+	CURRENT="$(crontab -l 2>/dev/null || true)"
+	if printf '%s\n' "$CURRENT" | grep -Fq "$MARK"; then
+		log "cron watchdog already installed"
+		return 0
+	fi
+
+	{ printf '%s\n' "$CURRENT"; printf '%s\n' "$LINE"; } \
+		| grep -v '^[[:space:]]*$' | crontab - || return 1
+
+	log "cron watchdog installed: every 5 min runs '$RCD_SCRIPT start'"
+	# Ask cron to reload; usually it notices the change by itself.
+	synoservice --restart crond >/dev/null 2>&1 \
+		|| /etc/init.d/crond restart >/dev/null 2>&1 \
+		|| true
 	return 0
 }
 
@@ -470,10 +500,15 @@ case "$AUTOSTART" in
 		fi
 	;;
 	rcd)
+		if ! install_cron; then
+			warn "Could not install the cron watchdog; add it manually if you want:"
+			warn "  crontab -e   ->  */5 * * * * $RCD_DIR/S99${SERVICE_NAME}.sh start >/dev/null 2>&1"
+		fi
 		if [ "$TOKEN_SET" = "1" ]; then
 			log "Starting the bot via rc.d..."
 			"$RCD_DIR/S99${SERVICE_NAME}.sh" start
-			log "Logs: tail -f $INSTALL_DIR/torrent-bot.log"
+			log "Logs:    tail -f $INSTALL_DIR/torrent-bot.log"
+			log "Control: $RCD_DIR/S99${SERVICE_NAME}.sh {start|stop|restart|status}"
 		else
 			log "TELEGRAM_BOT_TOKEN is not set yet - not starting."
 			log "1) nano $ENV_FILE"
@@ -486,6 +521,6 @@ case "$AUTOSTART" in
 		warn "  Control Panel -> Task Scheduler -> Create -> Triggered Task -> Boot-up"
 		warn "  User: root"
 		warn "  Command:"
-		warn "    cd $INSTALL_DIR && ./.venv/bin/python bot.py >> $INSTALL_DIR/torrent-bot.log 2>&1"
+		warn "    cd $INSTALL_DIR && ./.venv/bin/python bot.py >> $INSTALL_DIR/torrent-bot.out 2>&1"
 	;;
 esac
