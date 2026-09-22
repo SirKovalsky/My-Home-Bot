@@ -45,8 +45,8 @@ torrent-bot/
 │   ├── __init__.py
 │   └── torrent_parser.py     # bencode-разбор, категория, download-dir
 └── deploy/                   # развёртывание
-    ├── install.sh            # venv + зависимости + systemd-юнит (DSM 6.2)
-    ├── torrent-bot.service   # шаблон systemd-юнита (DSM 6.2)
+    ├── install.sh            # venv + зависимости + автозапуск (rc.d или systemd)
+    ├── torrent-bot.service   # шаблон systemd-юнита (DSM 7 / Linux)
     ├── check_proxy.py        # диагностика прокси/Transmission без nc и curl
     └── openwrt/
         ├── xray-socks-lan.json  # 2-й инстанс xray: SOCKS в LAN -> v2rayA
@@ -62,8 +62,13 @@ torrent-bot/
 
 ### 2.1. На Xpenology / Synology DSM 6.2 (Xpenology DSM 6.2.3-25426)
 
-DSM 6.2 основан на **systemd**, поэтому самый удобный способ автозапуска —
-собственный systemd-юнит. Готовые файлы лежат в `deploy/`.
+Готовые файлы лежат в `deploy/`. Способ автозапуска `install.sh` подбирает
+**автоматически**:
+
+- есть `/etc/systemd/system` (DSM 7 и большинство Linux) → ставит systemd-юнит;
+- иначе (обычный случай на **DSM 6.2** — каталога `/etc/systemd/system` там нет)
+  → ставит скрипт в `/usr/local/etc/rc.d/S99torrent-bot.sh`;
+- если не подошло ни то, ни другое → печатает инструкцию для Task Scheduler.
 
 **Что нужно один раз включить в DSM:**
 
@@ -96,42 +101,49 @@ DSM 6.2 основан на **systemd**, поэтому самый удобны�
 ```bash
 # 1) клонируем/кладём проект в папку на томе (не в /tmp — он чистится)
 cd /volume1
-git clone git@github.com:SirKovalsky/My-Home-Bot.git torrent-bot
+git clone git@github.com:SirKovalsky/My-Home-Bot.git My-Home-Bot
 #    либо (если git недоступен) просто скопируйте папку по SFTP/File Station
 
-# 2) установка: venv + зависимости + systemd-юнит
-cd /volume1/torrent-bot
+# 2) установка: venv + зависимости + автозапуск
+cd /volume1/My-Home-Bot
 sudo sh deploy/install.sh
 
 # 3) заполняем .env
 sudo nano .env
 
-# 4) запускаем (скрипт сам запустит, если токен уже был заполнен)
-sudo systemctl enable --now torrent-bot
-sudo systemctl status torrent-bot
+# 4) запуск (install.sh сам стартует, если токен уже был заполнен)
+#    DSM 6.x:
+sudo /usr/local/etc/rc.d/S99torrent-bot.sh start
+#    DSM 7 (если установился systemd-юнит):
+# sudo systemctl enable --now torrent-bot
 ```
 
 Скрипт `deploy/install.sh` делает всё сам: находит Python 3.8+ (`py3k`),
 создаёт `.venv`, ставит зависимости, **проверяет наличие PySocks** (без него
-`socks5h://` не работает), создаёт `.env` из `.env.example` и ставит
-systemd-юнит `torrent-bot.service`.
+`socks5h://` не работает), создаёт `.env` из `.env.example` и настраивает
+автозапуск — systemd-юнит либо rc.d-скрипт, смотря что есть в системе.
 
 Полезные команды:
 
 ```bash
-journalctl -u torrent-bot -f          # живой лог сервиса
-tail -f /volume1/torrent-bot/torrent-bot.log
+# DSM 6.x (rc.d)
+/usr/local/etc/rc.d/S99torrent-bot.sh status
+/usr/local/etc/rc.d/S99torrent-bot.sh restart
+/usr/local/etc/rc.d/S99torrent-bot.sh stop
+tail -f /volume1/My-Home-Bot/torrent-bot.log
+
+# DSM 7 (systemd)
+journalctl -u torrent-bot -f
 sudo systemctl restart torrent-bot
-sudo systemctl stop torrent-bot
 ```
 
 **Обновление версии:**
 
 ```bash
-cd /volume1/torrent-bot
+cd /volume1/My-Home-Bot
 sudo git pull
-sudo .venv/bin/pip install -r requirements.txt
-sudo systemctl restart torrent-bot
+sudo .venv/bin/pip install -r requirements-dsm6.txt   # Python 3.8; на 3.9+ — requirements.txt
+sudo /usr/local/etc/rc.d/S99torrent-bot.sh restart
 ```
 
 ### 2.2. Установка вручную (если не хотите install.sh)
@@ -161,18 +173,19 @@ $PY -m virtualenv .venv
 `PySocks` ставится автоматически вместе с `requests[socks]` — **без него схемы
 `socks5h://` не работают** (ошибка `Missing dependencies for SOCKS support`).
 
-### 2.3. Автозапуск через DSM Task Scheduler (альтернатива systemd)
+### 2.3. Автозапуск через DSM Task Scheduler (если не подошли systemd/rc.d)
 
-Если не хочется трогать systemd: *Control Panel → Task Scheduler → Create →
-Triggered Task → **Boot-up***, пользователь **root**, и такой скрипт:
+*Control Panel → Task Scheduler → Create → Triggered Task → **Boot-up***,
+пользователь **root**, и такой скрипт:
 
 ```bash
 #!/bin/sh
-cd /volume1/torrent-bot
-exec ./.venv/bin/python bot.py >> /volume1/torrent-bot/torrent-bot.log 2>&1
+cd /volume1/My-Home-Bot
+exec ./.venv/bin/python bot.py >> /volume1/My-Home-Bot/torrent-bot.log 2>&1
 ```
 
-Минус: нет автоперезапуска при падении — это даёт только systemd-юнит.
+Минус: нет автоперезапуска при падении — стабильнее использовать rc.d-скрипт
+из `install.sh` или systemd-юнит.
 
 ### 2.4. Настройка Transmission RPC на DSM (перед первым запуском бота)
 
