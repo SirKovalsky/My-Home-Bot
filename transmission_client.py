@@ -54,7 +54,7 @@ class TorrentInfo:
 
 
 class TransmissionClient:
-    """Тонкая синхронная обёртка. Вызывать из бота через asyncio.to_thread."""
+    """Тонкая синхронная обёртка. Вызывать из бота через хелпер to_thread()."""
 
     def __init__(self, cfg: config_module.Config | None = None) -> None:
         self._cfg = cfg or config_module.CONFIG

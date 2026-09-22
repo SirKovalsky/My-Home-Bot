@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import secrets
 import sys
@@ -46,6 +47,16 @@ from trackers import (
 )
 from transmission_client import TransmissionClient, TransmissionUnavailable
 from utils import torrent_parser
+
+# asyncio.to_thread() exists only since Python 3.9, while the Synology DSM 6.2
+# Python package is 3.8. Emulate it with the default thread pool.
+if hasattr(asyncio, "to_thread"):
+    to_thread = asyncio.to_thread
+else:  # Python 3.8 fallback
+    async def to_thread(func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
 
 log = logging.getLogger("torrent-bot")
 
@@ -222,7 +233,7 @@ async def _do_login(message: Message, tracker_name: str) -> None:
 
     try:
         # Логин — блокирующий вызов с сетью через прокси: уводим в поток.
-        await asyncio.to_thread(tracker.login, login, password)
+        await to_thread(tracker.login, login, password)
     except NotLoggedInError as exc:
         await message.answer(f"❌ Не удалось войти: {exc}")
     except CaptchaError as exc:
@@ -244,7 +255,7 @@ async def cmd_status(message: Message) -> None:
         return await deny(message)
     track_chat(message)
     try:
-        torrents = await asyncio.to_thread(transmission.get_status)
+        torrents = await to_thread(transmission.get_status)
     except TransmissionUnavailable as exc:
         return await message.answer(f"⚠️ Transmission недоступен: {exc}")
 
@@ -264,8 +275,8 @@ async def cmd_stats(message: Message) -> None:
         return await deny(message)
     track_chat(message)
     try:
-        stats = await asyncio.to_thread(transmission.get_stats)
-        session = await asyncio.to_thread(transmission.session_stats)
+        stats = await to_thread(transmission.get_stats)
+        session = await to_thread(transmission.session_stats)
     except TransmissionUnavailable as exc:
         return await message.answer(f"⚠️ Transmission недоступен: {exc}")
 
@@ -352,7 +363,7 @@ async def process_tracker_url(message: Message, tracker_name: str, url: str) -> 
         f"🔎 Разбираю раздачу {tracker_name} через прокси {CONFIG.proxy_url}..."
     )
     try:
-        result = await asyncio.to_thread(tracker.resolve, url)
+        result = await to_thread(tracker.resolve, url)
     except NotLoggedInError as exc:
         return await status.edit_text(
             f"🔑 {exc}\nВыполните /login_{tracker_name} и повторите."
@@ -470,7 +481,7 @@ async def on_folder_chosen(callback: CallbackQuery) -> None:
 
     download_dir = torrent_parser.resolve_download_dir(category)
     try:
-        info = await asyncio.to_thread(
+        info = await to_thread(
             transmission.add_torrent,
             torrent_bytes=pending.torrent_bytes,
             magnet=pending.magnet,
@@ -561,7 +572,7 @@ class CompletionNotifier:
 
     async def _prime(self) -> None:
         try:
-            torrents = await asyncio.to_thread(transmission.get_status)
+            torrents = await to_thread(transmission.get_status)
         except Exception:  # noqa: BLE001
             return
         for t in torrents:
@@ -571,7 +582,7 @@ class CompletionNotifier:
 
     async def _tick(self) -> None:
         try:
-            torrents = await asyncio.to_thread(transmission.get_status)
+            torrents = await to_thread(transmission.get_status)
         except TransmissionUnavailable as exc:
             log.warning("Transmission недоступен в цикле уведомлений: %s", exc)
             return
@@ -653,7 +664,7 @@ async def main() -> None:
 
     log.info("Проверяю Transmission...")
     try:
-        await asyncio.to_thread(transmission.get_status)
+        await to_thread(transmission.get_status)
         log.info("Transmission доступен (без прокси).")
     except TransmissionUnavailable as exc:
         log.warning("Transmission сейчас недоступен: %s", exc)

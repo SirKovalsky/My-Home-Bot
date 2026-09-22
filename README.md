@@ -812,6 +812,7 @@ PY
 | Симптом в логе/чате | Причина и что делать |
 |---|---|
 | `ImportError: urllib3 v2 only supports OpenSSL 1.1.1+` (у вас OpenSSL 1.0.2u) | Python 3.8 в DSM 6.2 собран со старым OpenSSL → `.venv/bin/pip install "urllib3<2"` (уже зафиксировано в `requirements-dsm6.txt`) |
+| `AttributeError: module 'asyncio' has no attribute 'to_thread'` | `asyncio.to_thread` есть только с Python 3.9. В `bot.py` добавлен совместимый хелпер `to_thread()` для 3.8 → просто обновите код (`git pull`) |
 | `UnicodeEncodeError: ... surrogates not allowed` при настройке | в поле попал не-ASCII символ (локаль DSM обычно `C`). `install.sh` теперь проверяет поля и пишет байтобезопасно; перезапустите его и введите адрес/порт заново |
 | `Missing dependencies for SOCKS support` | не установлен PySocks → `pip install "requests[socks]"` |
 | `Could not find a version that satisfies the requirement aiogram` / `requires a different Python` | Python 3.8 на DSM 6.2 и свежие версии библиотек → ставьте `requirements-dsm6.txt` (или новый Python из SynoCommunity) |
