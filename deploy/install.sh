@@ -307,16 +307,40 @@ configure_env() {
 	fi
 
 	# --- Telegram Bot API access ---
+	# The HTTP inbound of xray-socks-lan sits right after the SOCKS port.
+	PROXY_HTTP_PORT=$((PROXY_PORT + 1))
+	TG_SUGGEST=""
+	if [ -n "$PROXY_HOST" ]; then
+		TG_SUGGEST="http://${PROXY_HOST}:${PROXY_HTTP_PORT}"
+	fi
+
 	echo
 	echo "-- Telegram Bot API (api.telegram.org) --"
-	echo "   Leave empty if Telegram works directly."
-	echo "   If it is blocked, give an HTTP proxy. Our xray-socks-lan also serves"
-	echo "   HTTP on port $((PROXY_PORT + 1)) (SOCKS stays on ${PROXY_PORT})."
-	echo "   A SOCKS proxy is not supported here (it would need aiohttp-socks)."
-	ask_valid "  Telegram proxy URL (http://host:port, Enter = direct)" \
-		"$(current_value TELEGRAM_PROXY_URL)" \
-		'^(|https?://[A-Za-z0-9._:-]+)$' "expected http://host:port, or empty"
-	set_env TELEGRAM_PROXY_URL "$ANSWER"
+	echo "   If Telegram is blocked on this network, route it via the HTTP proxy"
+	echo "   on the OpenWrt box you just entered."
+	[ -n "$TG_SUGGEST" ] && echo "   Suggested: $TG_SUGGEST"
+	TG_CURRENT="$(current_value TELEGRAM_PROXY_URL)"
+	if [ -n "$TG_CURRENT" ] && [ "$TG_CURRENT" != "$TG_SUGGEST" ]; then
+		echo "   Currently in .env: $TG_CURRENT"
+	fi
+	echo "   Answer with: Enter = value above, a port (e.g. $PROXY_HTTP_PORT),"
+	echo "   host:port, a full http:// URL, or 'none' = direct."
+
+	ask_valid "  Telegram proxy" \
+		"$(default_or TELEGRAM_PROXY_URL "$TG_SUGGEST")" \
+		'^(|https?://[A-Za-z0-9._:-]+|[A-Za-z0-9._-]+:[0-9]{1,5}|[0-9]{1,5}|none|off|direct)$' \
+		"a port, host:port, http:// URL, 'none', or empty"
+
+	# Accept a bare port and/or just host:port - no need to retype the host.
+	# Order matters: host:port also starts with a digit, so check for ':'
+	# before treating the answer as a bare port.
+	case "$ANSWER" in
+		""|none|off|direct) TG_VALUE="" ;;
+		*://*)              TG_VALUE="$ANSWER" ;;
+		*:*)                TG_VALUE="http://${ANSWER}" ;;
+		*)                  TG_VALUE="http://${PROXY_HOST}:${ANSWER}" ;;
+	esac
+	set_env TELEGRAM_PROXY_URL "$TG_VALUE"
 
 	# --- Transmission RPC (no proxy) ---
 	echo
