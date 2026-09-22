@@ -270,7 +270,7 @@ configure_env() {
 		set_env TELEGRAM_BOT_TOKEN "$ANSWER"
 	fi
 
-	ask_valid "  Your Telegram user id(s), comma separated (empty = anyone)" \
+	ask_valid "  Your Telegram user id(s), comma separated (empty = anyone; find yours via @userinfobot)" \
 		"$(current_value ALLOWED_USER_IDS)" '^[0-9, ]*$' \
 		"digits and commas only, e.g. 111111111,222222222"
 	set_env ALLOWED_USER_IDS "$ANSWER"
@@ -279,6 +279,7 @@ configure_env() {
 	echo
 	echo "-- Proxy on OpenWrt (ONLY tracker traffic goes here) --"
 	echo "   Transmission is NOT affected: it always stays direct."
+	echo "   Example: socks5h://192.168.1.2:11080   (scheme://host:SOCKS_PORT)"
 	cur_url="$(current_value PROXY_URL)"
 	cur_scheme="socks5h"; cur_host=""; cur_port=""
 	case "$cur_url" in
@@ -309,8 +310,9 @@ configure_env() {
 	echo
 	echo "-- Telegram Bot API (api.telegram.org) --"
 	echo "   Leave empty if Telegram works directly."
-	echo "   If it is blocked, use an HTTP proxy: our xray-socks-lan serves"
-	echo "   HTTP on port 1081 (SOCKS on 1080). SOCKS here is not supported."
+	echo "   If it is blocked, give an HTTP proxy. Our xray-socks-lan also serves"
+	echo "   HTTP on port $((PROXY_PORT + 1)) (SOCKS stays on ${PROXY_PORT})."
+	echo "   A SOCKS proxy is not supported here (it would need aiohttp-socks)."
 	ask_valid "  Telegram proxy URL (http://host:port, Enter = direct)" \
 		"$(current_value TELEGRAM_PROXY_URL)" \
 		'^(|https?://[A-Za-z0-9._:-]+)$' "expected http://host:port, or empty"
