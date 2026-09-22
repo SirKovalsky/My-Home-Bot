@@ -122,6 +122,15 @@ if ! "$VENV_PY" -c 'import socks' 2>/dev/null; then
 fi
 log "Dependencies import cleanly; PySocks present (socks5h:// supported)."
 
+# Soft check: curl_cffi is what gets past Cloudflare on the trackers.
+if "$VENV_PY" -c 'import curl_cffi' 2>/dev/null; then
+	log "curl_cffi present (browser TLS impersonation for Cloudflare)."
+else
+	warn "curl_cffi is NOT installed - trackers will use plain requests and"
+	warn "may be blocked by Cloudflare ('Just a moment...', HTTP 403)."
+	warn "Try: $VENV_PY -m pip install 'curl_cffi==0.9.0'"
+fi
+
 # --- 3. .env file --------------------------------------------------------- #
 ENV_FILE="$INSTALL_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then

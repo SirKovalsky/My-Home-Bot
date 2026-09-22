@@ -6,3 +6,5 @@ requests[socks]>=2.31
 # Обёртка Transmission RPC (работает через requests, используем БЕЗ прокси).
 transmission-rpc>=7.0.0
 python-dotenv>=1.0.0
+# Обход Cloudflare на трекерах: подделка браузерного TLS/HTTP-фингерпринта.
+curl_cffi>=0.9

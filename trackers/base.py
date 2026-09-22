@@ -26,6 +26,38 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+# curl_cffi подделывает TLS/HTTP-фингерпринт реального браузера — именно это
+# проходит проверку Cloudflare («Just a moment...»). Обычный requests она
+# распознаёт и отдаёт челлендж. Если curl_cffi не установился/не импортируется,
+# спокойно работаем на requests, как раньше.
+try:
+    from curl_cffi import requests as curl_requests
+    from curl_cffi.requests import exceptions as curl_exceptions
+
+    HAVE_CURL_CFFI = True
+except Exception:  # noqa: BLE001
+    curl_requests = None
+    curl_exceptions = None
+    HAVE_CURL_CFFI = False
+
+try:
+    import certifi
+
+    _CA_BUNDLE = certifi.where()
+except Exception:  # noqa: BLE001
+    _CA_BUNDLE = None
+
+if HAVE_CURL_CFFI:
+    _ProxyError = curl_exceptions.ProxyError
+    _ConnectionError = curl_exceptions.ConnectionError
+    _TimeoutError = curl_exceptions.Timeout
+    _RequestError = curl_exceptions.RequestException
+else:
+    _ProxyError = requests.exceptions.ProxyError
+    _ConnectionError = requests.exceptions.ConnectionError
+    _TimeoutError = requests.exceptions.Timeout
+    _RequestError = requests.exceptions.RequestException
+
 log = logging.getLogger(__name__)
 
 # Маркеры капчи/антибота, встречающиеся на rutracker/kinozal.
@@ -151,7 +183,28 @@ class BaseTracker(ABC):
     # ------------------------------------------------------------------ #
     #  Сессия
     # ------------------------------------------------------------------ #
-    def _build_session(self, user_agent: str) -> requests.Session:
+    def _build_session(self, user_agent: str):
+        headers = {
+            # Реальный браузерный UA — иначе бан.
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+
+        if HAVE_CURL_CFFI:
+            # >>> ЗДЕСЬ ЗАДАЁТСЯ ПРОКСИ <<< (та же явная структура, что и ниже)
+            session = curl_requests.Session(
+                impersonate="chrome",
+                headers=headers,
+                proxies=dict(self._proxies),
+                timeout=self._timeout,
+                trust_env=False,
+                verify=_CA_BUNDLE if _CA_BUNDLE else True,
+            )
+            session.proxies = dict(self._proxies)
+            session.trust_env = False
+            return session
+
         session = requests.Session()
 
         # >>> ЗДЕСЬ ЗАДАЁТСЯ ПРОКСИ <<<
@@ -162,16 +215,7 @@ class BaseTracker(ABC):
         # Игнорируем системные HTTP_PROXY/HTTPS_PROXY/NO_PROXY, если они вдруг
         # появятся в окружении: маршрутизация должна быть только явной.
         session.trust_env = False
-
-        session.headers.update(
-            {
-                # Реальный браузерный UA — иначе бан.
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Connection": "keep-alive",
-            }
-        )
+        session.headers.update(headers)
         return session
 
     @property
@@ -188,6 +232,14 @@ class BaseTracker(ABC):
     def _cookies_file(self) -> Path:
         return self._cookies_path.with_suffix(f".{self.name}.pickle")
 
+    def _cookies_for_pickle(self):
+        """CookieJar для сериализации.
+
+        У curl_cffi cookies — обёртка с .jar внутри; у requests это уже jar.
+        """
+        cookies = self._session.cookies
+        return getattr(cookies, "jar", cookies)
+
     def save_cookies(self) -> None:
         path = self._cookies_file()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +248,7 @@ class BaseTracker(ABC):
                 pickle.dump(
                     {
                         "saved_at": time.time(),
-                        "cookies": self._session.cookies,
+                        "cookies": self._cookies_for_pickle(),
                     },
                     fh,
                 )
@@ -237,18 +289,20 @@ class BaseTracker(ABC):
 
         try:
             response = self._session.request(method, url, **kwargs)
-        except requests.exceptions.ProxyError as exc:
+        except _ProxyError as exc:
             raise ProxyUnavailableError(
                 f"Прокси {self._proxies.get('https')} недоступен: {exc}"
             ) from exc
-        except requests.exceptions.ConnectionError as exc:
-            raise ProxyUnavailableError(
-                f"Ошибка соединения (возможно, прокси недоступен или трекер не резолвится): {exc}"
-            ) from exc
-        except requests.exceptions.Timeout as exc:
+        except _TimeoutError as exc:
             raise TrackerError(f"Таймаут запроса к {url} через прокси") from exc
-        except requests.exceptions.RequestException as exc:
+        except _ConnectionError as exc:
+            raise ProxyUnavailableError(
+                f"Ошибка соединения (прокси недоступен или трекер не резолвится): {exc}"
+            ) from exc
+        except _RequestError as exc:
             raise TrackerError(f"Ошибка HTTP-запроса к {url}: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise TrackerError(f"Неожиданная ошибка запроса к {url}: {exc}") from exc
 
         self._check_captcha(response)
         return response

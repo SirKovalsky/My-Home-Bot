@@ -887,7 +887,8 @@ PY
 | `требует авторизацию` | истекли cookies → `/login_rutracker` или `/login_kinozal` |
 | `aiogram.exceptions.TelegramNetworkError: Request timeout error` | `api.telegram.org` не открывается напрямую → задайте HTTP-прокси: `TELEGRAM_PROXY_URL=http://<IP_OpenWrt>:1081` (наш xray-socks-lan отдаёт HTTP на 1081) |
 | `Transmission недоступен` | RPC выключен, неверный порт/логин, или `localhost` в контейнере ≠ хост |
-| Трекер отдал `403/429` | бан UA/лимит; смените `USER_AGENT`, уменьшите частоту запросов |
+| `403` с телом `Just a moment...` | это Cloudflare-челлендж, а не бан IP. Нужен `curl_cffi` (подделка браузерного TLS): он в `requirements-dsm6.txt`. Проверьте `.venv/bin/python -c "import curl_cffi"`. Без него трекеры работают на обычном `requests` и их обламывает Cloudflare |
+| Трекер отдал `403/429` (другое тело) | бан UA/лимит; смените `USER_AGENT`, уменьшите частоту запросов |
 | `ps w \| grep xray` показывает несколько процессов с `/etc/xray-socks-lan.json` | остался ручной запуск. Init-скрипт при старте сам убивает «осиротевшие»; вручную: `kill <pid>` лишнего либо `/etc/init.d/xray-socks-lan restart` |
 
 Логи пишутся одновременно в stdout и в файл `LOG_FILE` (по умолчанию
