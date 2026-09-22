@@ -1,0 +1,18 @@
+{
+  "inbounds": [
+    {
+      "tag": "socks-lan",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+      }
+    }
+  ]
+}

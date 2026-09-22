@@ -49,7 +49,9 @@ torrent-bot/
     ├── torrent-bot.service   # шаблон systemd-юнита (DSM 6.2)
     ├── check_proxy.py        # диагностика прокси/Transmission без nc и curl
     └── openwrt/
-        └── socks-lan.init    # проброс SOCKS5 v2rayA в LAN (socat, procd)
+        ├── socks-lan.init    # проброс SOCKS5 в LAN через socat (procd)
+        └── confdir/
+            └── socks-lan.json # SOCKS-вход для --v2ray-confdir (без пакетов)
 ```
 
 ---
@@ -364,6 +366,10 @@ if t.Setting.PortSharing { listenAddr = "0.0.0.0" }
 | Port of SOCKS5 (with Rule) | `0` (закрыт) |
 | Port of HTTP (with Rule) | `20172` |
 
+> Если OpenWrt стоит **за Keenetic** (его WAN — это адрес из сети Keenetic), то
+> порт наружу всё равно не смотрит: интернета за ним нет. Поэтому биндить можно
+> спокойно на `0.0.0.0`, не заботясь о firewall.
+
 ### Почему НЕ включаем «Port Sharing»
 
 Кнопка **Port Sharing** действительно переключает входы на `0.0.0.0` (в коде
@@ -373,57 +379,127 @@ v2rayA: `if PortSharing { listenAddr = "0.0.0.0" }`). Но в интерфейс
 «открыть порт». Его включение меняет схему перехвата для **всех** клиентов,
 ходящих через OpenWrt, — отсюда и поломки, с которыми вы воевали.
 
-Нам оно не нужно.
+Нам оно не нужно — есть два способа обойтись без него.
 
-### Рекомендуемый способ: проброс порта на LAN через `socat`
+### Способ A (без установки пакетов): дополнительный каталог конфигов v2rayA
 
-v2rayA оставляем ровно как есть (она слушает `127.0.0.1:20170`), а наружу порт
-отдаём обычным TCP-форвардером, **привязанным к LAN-адресу OpenWrt**:
+v2rayA умеет запускать ядро с параметром `--confdir=<каталог>`, и файлы из этого
+каталога **сливаются** с её сгенерированным конфигом. Это ровно наш случай: мы
+добавляем свой SOCKS-вход отдельным файлом, а прозрачный прокси и Port Sharing
+не трогаем.
 
-```bash
-opkg update && opkg install socat
+Факты из исходников v2rayA:
 
-# разовый запуск для проверки (подставьте свой LAN-адрес OpenWrt):
-socat TCP-LISTEN:20170,bind=192.168.1.2,fork,reuseaddr TCP:127.0.0.1:20170
+```
+core запускается как:  v2raya_core run --config=/etc/v2raya/config.json \
+                                         --confdir=<V2rayConfigDirectory>
 ```
 
-`bind=192.168.1.2` — принципиально: слушаем **только LAN-интерфейс**, поэтому в
-WAN порт не торчит и firewall трогать не нужно.
+`<V2rayConfigDirectory>` задаётся флагом `--v2ray-confdir` **или** переменной
+окружения `V2RAYA_V2RAY_CONFDIR`. Если параметр пуст — доп. каталог не читается.
 
-Чтобы проброс поднимался при загрузке, используйте готовый init-скрипт из
-репозитория (он под procd, с автоперезапуском):
+Шаги:
 
 ```bash
-# в deploy/openwrt/socks-lan.init при необходимости поменяйте LAN_IP
+ssh root@192.168.1.2
+
+# 1) каталог для доп. конфигов
+mkdir -p /etc/v2raya/confdir
+
+# 2) файл из репозитория (deploy/openwrt/confdir/socks-lan.json)
+cat > /etc/v2raya/confdir/socks-lan.json <<'JSON'
+{
+  "inbounds": [
+    {
+      "tag": "socks-lan",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": false },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+    }
+  ]
+}
+JSON
+
+# 3) проверить, поддерживает ли ваш v2rayA этот параметр
+v2raya --help 2>&1 | grep -i confdir
+```
+
+Если `confdir` в `--help` есть — прописываем его в запуск v2rayA. Как именно —
+зависит от того, чем он стартует; посмотрите:
+
+```bash
+cat /etc/init.d/v2raya 2>/dev/null
+cat /etc/config/v2raya 2>/dev/null
+ps w | grep v2raya
+```
+
+- Если v2rayA стартует из init-скрипта — добавьте к команде запуска
+  `--v2ray-confdir=/etc/v2raya/confdir`.
+- Если через uci/env — задайте `V2RAYA_V2RAY_CONFDIR=/etc/v2raya/confdir`.
+- Проще всего, если init-скрипт читает переменные: добавьте строку
+  `export V2RAYA_V2RAY_CONFDIR=/etc/v2raya/confdir` перед запуском бинаря.
+
+Затем перезапустить и проверить:
+
+```bash
+/etc/init.d/v2raya restart      # или: reboot
+netstat -lnpt | grep 1080       # ждём 0.0.0.0:1080
+```
+
+В `.env`:
+
+```env
+PROXY_URL=socks5h://192.168.1.2:1080
+```
+
+Если `confdir` в `--help` отсутствует (слишком старая сборка) — переходите к B.
+
+### Способ B: проброс порта (`socat`/`ncat`)
+
+Подходит, если на роутере есть пакетный менеджер или нужная утилита уже стоит.
+Проверить:
+
+```bash
+which apk opkg socat ncat nc
+```
+
+- есть `apk` → `apk add socat`
+- есть `opkg` → `opkg update && opkg install socat`
+- уже есть `socat` → просто запустить:
+
+```bash
+# 0.0.0.0 допустим, т.к. OpenWrt за Keenetic; для строгости можно bind=<LAN_IP>
+socat TCP-LISTEN:20170,fork,reuseaddr TCP:127.0.0.1:20170
+```
+
+Чтобы поднималось при загрузке, в репозитории есть готовый procd-скрипт
+`deploy/openwrt/socks-lan.init` (в нём при желании поменяйте `LAN_IP`/`SOCKS_PORT`):
+
+```bash
 scp deploy/openwrt/socks-lan.init root@192.168.1.2:/etc/init.d/socks-lan
 ssh root@192.168.1.2
 chmod +x /etc/init.d/socks-lan
 /etc/init.d/socks-lan enable
 /etc/init.d/socks-lan start
-logread -e socks-lan          # смотрим, что поднялось
+logread -e socks-lan
+netstat -lnpt | grep 20170
 ```
 
-Проверка на OpenWrt, что порт слушается в LAN:
-
-```bash
-netstat -lnpt | grep 20170    # ждём 192.168.1.2:20170 (не 127.0.0.1 и не 0.0.0.0)
-```
-
-В `.env` указывайте адрес OpenWrt и этот порт:
+В `.env` тогда:
 
 ```env
 PROXY_URL=socks5h://192.168.1.2:20170
 ```
 
-> Это не проксирование и не перехват — просто локальный проброс порта на самом
-> OpenWrt. Прозрачный прокси, правила маршрутизации и остальные клиенты не
-> затрагиваются.
+### Проверить маршрутизацию (для обоих способов)
 
-> **Важно проверить маршрутизацию.** Порт `20170` — это обычный SOCKS5-вход,
-> и его трафик подчиняется общим правилам v2rayA (у вас `Traffic Splitting Mode
-> of Rule Port: RoutingA`). Если `deploy/check_proxy.py` покажет, что через
-> прокси внешний IP совпадает с провайдерским, — значит трафик уходит в `direct`,
-> и в правила v2rayA надо добавить `rutracker.org` / `kinozal.me` в проксируемые.
+И способ A, и способ B отдают обычный SOCKS-вход, трафик которого подчиняется
+общим правилам v2rayA (у вас `Traffic Splitting Mode of Rule Port: RoutingA`).
+Если `deploy/check_proxy.py` покажет, что внешний IP через прокси **совпадает**
+с провайдерским, — трафик уходит в `direct`, и в правила v2rayA надо добавить
+`rutracker.org` / `kinozal.me` в проксируемые. Если IP **разный** — всё готово.
 
 ### 4.3.1. Вариант надёжнее — Custom Inbound (только в новых версиях)
 
