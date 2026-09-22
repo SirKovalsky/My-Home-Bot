@@ -15,6 +15,18 @@
       "sniffing": {
         "enabled": false
       }
+    },
+    {
+      "tag": "http-lan",
+      "listen": "0.0.0.0",
+      "port": 1081,
+      "protocol": "http",
+      "settings": {
+        "timeout": 300
+      },
+      "sniffing": {
+        "enabled": false
+      }
     }
   ],
   "outbounds": [

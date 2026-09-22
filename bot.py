@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Set
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
@@ -657,8 +658,17 @@ async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
+    # Telegram Bot API access. If api.telegram.org is blocked on the ISP, set
+    # TELEGRAM_PROXY_URL (HTTP proxy) - only this control channel is proxied,
+    # P2P and Transmission stay direct.
+    session = None
+    if CONFIG.telegram_proxy:
+        log.info("Telegram Bot API через прокси: %s", CONFIG.telegram_proxy)
+        session = AiohttpSession(proxy=CONFIG.telegram_proxy)
+
     bot = Bot(
         token=CONFIG.telegram_token,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 

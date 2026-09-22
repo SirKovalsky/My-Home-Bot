@@ -305,6 +305,17 @@ configure_env() {
 		set_env PROXY_URL "${PROXY_SCHEME}://${PROXY_HOST}:${PROXY_PORT}"
 	fi
 
+	# --- Telegram Bot API access ---
+	echo
+	echo "-- Telegram Bot API (api.telegram.org) --"
+	echo "   Leave empty if Telegram works directly."
+	echo "   If it is blocked, use an HTTP proxy: our xray-socks-lan serves"
+	echo "   HTTP on port 1081 (SOCKS on 1080). SOCKS here is not supported."
+	ask_valid "  Telegram proxy URL (http://host:port, Enter = direct)" \
+		"$(current_value TELEGRAM_PROXY_URL)" \
+		'^(|https?://[A-Za-z0-9._:-]+)$' "expected http://host:port, or empty"
+	set_env TELEGRAM_PROXY_URL "$ANSWER"
+
 	# --- Transmission RPC (no proxy) ---
 	echo
 	echo "-- Transmission RPC (always WITHOUT proxy) --"

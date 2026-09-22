@@ -138,6 +138,12 @@ class Config:
     proxy_url: str = _get("PROXY_URL", "socks5h://127.0.0.1:1080")
     proxy_timeout: int = _get_int("PROXY_TIMEOUT", 30)
 
+    # Optional proxy for the Telegram Bot API only (api.telegram.org is blocked
+    # in some networks). Leave empty when Telegram is reachable directly.
+    # HTTP(S) is preferred: aiohttp supports it natively, so no extra Python
+    # package is needed (SOCKS would require aiohttp-socks).
+    telegram_proxy: str = _get("TELEGRAM_PROXY_URL")
+
     # --- Transmission RPC (БЕЗ прокси) ---
     transmission_host: str = _get("TRANSMISSION_HOST", "127.0.0.1")
     transmission_port: int = _get_int("TRANSMISSION_PORT", 9091)

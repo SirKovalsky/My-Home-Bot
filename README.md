@@ -289,6 +289,7 @@ python bot.py
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | токен от [@BotFather](https://t.me/BotFather) |
 | `ALLOWED_USER_IDS` | ваш Telegram user id (можно несколько через запятую). Пусто = доступ всем — **не рекомендуется** |
+| `TELEGRAM_PROXY_URL` | HTTP-прокси **только для Bot API**, если `api.telegram.org` заблокирован. Пусто = напрямую. Пример: `http://172.50.16.24:1081`. SOCKS здесь не поддерживается (потребовал бы пакет `aiohttp-socks`) |
 
 ### Прокси (только для трекеров!)
 | Переменная | Описание |
@@ -569,6 +570,14 @@ PROXY_URL=socks5h://192.168.1.2:1080
 Цепочка: `Xpenology -> OpenWrt:1080 (свой xray) -> 127.0.0.1:20170 (SOCKS v2rayA)
 -> туннель`. Прозрачный прокси и Port Sharing не задействованы.
 
+Тот же инстанс отдаёт ещё и **HTTP-прокси на порту 1081** — он нужен, если у
+провайдера заблокирован `api.telegram.org`: aiogram не умеет SOCKS без пакета
+`aiohttp-socks`, а HTTP поддерживает «из коробки». Тогда в `.env`:
+
+```env
+TELEGRAM_PROXY_URL=http://172.50.16.24:1081
+```
+
 ### Способ C: проброс порта (`socat`/`ncat`)
 
 Подходит, если на роутере есть пакетный менеджер или нужная утилита уже стоит.
@@ -838,6 +847,7 @@ PY
 | `Обнаружена капча/антибот` | трекер требует капчу; подождите, смените UA/прокси, проверьте логин |
 | `rutracker не выдал cookie bb_session` | неверный логин/пароль, либо нужен вход через браузер (проверьте данные в `.env`) |
 | `требует авторизацию` | истекли cookies → `/login_rutracker` или `/login_kinozal` |
+| `aiogram.exceptions.TelegramNetworkError: Request timeout error` | `api.telegram.org` не открывается напрямую → задайте HTTP-прокси: `TELEGRAM_PROXY_URL=http://<IP_OpenWrt>:1081` (наш xray-socks-lan отдаёт HTTP на 1081) |
 | `Transmission недоступен` | RPC выключен, неверный порт/логин, или `localhost` в контейнере ≠ хост |
 | Трекер отдал `403/429` | бан UA/лимит; смените `USER_AGENT`, уменьшите частоту запросов |
 | `ps w \| grep xray` показывает несколько процессов с `/etc/xray-socks-lan.json` | остался ручной запуск. Init-скрипт при старте сам убивает «осиротевшие»; вручную: `kill <pid>` лишнего либо `/etc/init.d/xray-socks-lan restart` |
