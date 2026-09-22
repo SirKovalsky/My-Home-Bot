@@ -136,6 +136,32 @@ current_value() {
 	grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2-
 }
 
+# Value of KEY, or a fallback when it is empty or missing in .env.
+# Defaults must not depend on the current file contents.
+default_or() {
+	_v="$(current_value "$1")"
+	[ -n "$_v" ] || _v="$2"
+	printf '%s' "$_v"
+}
+
+# Parent directory of a path (to guess the download base dir).
+parent_of() {
+	case "$1" in
+		*/?*) printf '%s' "${1%/*}" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+# Configured = a real bot token plus a PROXY_URL that is not localhost
+# (localhost would mean "on this NAS", which is always wrong for the proxy).
+is_configured() {
+	_tok="$(current_value TELEGRAM_BOT_TOKEN)"
+	case "$_tok" in ""|123456:*) return 1 ;; esac
+	_url="$(current_value PROXY_URL)"
+	case "$_url" in ""|*127.0.0.1*|*localhost*) return 1 ;; esac
+	return 0
+}
+
 set_env() {
 	# Robust in-place update. Values may contain / : + = and even non-UTF-8
 	# bytes: on DSM the locale is usually "C", so Python decodes argv with
@@ -228,13 +254,15 @@ configure_env() {
 	cur_token="$(current_value TELEGRAM_BOT_TOKEN)"
 	if is_placeholder "$cur_token"; then cur_token=""; fi
 
-	if [ -n "$cur_token" ]; then
-		printf 'Setup looks complete. Re-run interactive configuration? [y/N]: '
+	if is_configured; then
+		printf 'Existing .env looks configured. Re-run the setup to review values? [y/N]: '
 		read -r _again || _again=""
 		case "$_again" in
 			[Yy]*) ;;
 			*) log "Keeping the existing .env unchanged."; return 0 ;;
 		esac
+	else
+		log "Some required values are still missing - let's fill them in."
 	fi
 
 	echo
@@ -243,21 +271,22 @@ configure_env() {
 
 	# --- Telegram ---
 	echo "-- Telegram --"
-	ask_valid "  Bot token (from @BotFather)" "$cur_token" \
-		'^([0-9]{6,}:[A-Za-z0-9_-]{20,})?$' \
-		"expected like 123456789:AA... (Enter alone to skip and set it later)"
+	ask_valid "  Bot token from @BotFather (123456789:AA... ; Enter to skip)" \
+		"$cur_token" '^([0-9]{6,}:[A-Za-z0-9_-]{20,})?$' \
+		"a token looks like 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 	if [ -n "$ANSWER" ]; then
 		set_env TELEGRAM_BOT_TOKEN "$ANSWER"
 	fi
 
-	ask_valid "  Allowed user ids (comma separated, empty = everyone)" \
+	ask_valid "  Your Telegram user id(s), comma separated (empty = anyone)" \
 		"$(current_value ALLOWED_USER_IDS)" '^[0-9, ]*$' \
-		"only digits and commas, e.g. 111111111,222222222"
+		"digits and commas only, e.g. 111111111,222222222"
 	set_env ALLOWED_USER_IDS "$ANSWER"
 
 	# --- Proxy to trackers ---
 	echo
-	echo "-- Proxy on OpenWrt (trackers only) --"
+	echo "-- Proxy on OpenWrt (ONLY tracker traffic goes here) --"
+	echo "   Transmission is NOT affected: it always stays direct."
 	cur_url="$(current_value PROXY_URL)"
 	cur_scheme="socks5h"; cur_host=""; cur_port=""
 	case "$cur_url" in
@@ -270,15 +299,14 @@ configure_env() {
 			esac
 			;;
 	esac
-	[ -n "$cur_host" ] || cur_host=""
 
 	ask_valid "  Scheme (socks5h recommended)" "${cur_scheme:-socks5h}" \
 		'^(socks5h|socks5|http|https)$' "use socks5h, socks5, http or https"
 	PROXY_SCHEME="$ANSWER"
-	ask_valid "  OpenWrt address (IP or hostname)" "$cur_host" \
-		'^[A-Za-z0-9._-]+$' "ASCII letters, digits, dot and hyphen only"
+	ask_valid "  Address of the OpenWrt box (IP or hostname)" "$cur_host" \
+		'^[A-Za-z0-9._-]+$' "ASCII only, e.g. 192.168.1.2 or 172.50.16.24"
 	PROXY_HOST="$ANSWER"
-	ask_port "  Port (xray-socks-lan uses 1080; v2rayA SOCKS5 usually 20170)" \
+	ask_port "  Port (our xray-socks-lan = 1080, v2rayA SOCKS5 usually 20170)" \
 		"${cur_port:-1080}"
 	PROXY_PORT="$ANSWER"
 	if [ -n "$PROXY_HOST" ]; then
@@ -287,22 +315,29 @@ configure_env() {
 
 	# --- Transmission RPC (no proxy) ---
 	echo
-	echo "-- Transmission RPC (used WITHOUT proxy) --"
-	ask_valid "  Host" "$(current_value TRANSMISSION_HOST)" \
-		'^[A-Za-z0-9._-]+$' "ASCII letters, digits, dot and hyphen only"
+	echo "-- Transmission RPC (always WITHOUT proxy) --"
+	echo "   Transmission runs on this NAS, so Host is normally 127.0.0.1."
+	ask_valid "  Host (127.0.0.1 = this NAS)" \
+		"$(default_or TRANSMISSION_HOST 127.0.0.1)" \
+		'^[A-Za-z0-9._-]+$' "ASCII only, e.g. 127.0.0.1 or the NAS IP"
 	set_env TRANSMISSION_HOST "$ANSWER"
-	ask_port "  Port" "$(current_value TRANSMISSION_PORT)"
+	ask_port "  Port (Transmission RPC port, default 9091)" \
+		"$(default_or TRANSMISSION_PORT 9091)"
 	set_env TRANSMISSION_PORT "$ANSWER"
-	ask "  RPC username (empty if none)" "$(current_value TRANSMISSION_USER)"
+	ask "  RPC username (Enter if RPC auth is disabled)" \
+		"$(current_value TRANSMISSION_USER)"
 	set_env TRANSMISSION_USER "$ANSWER"
-	ask "  RPC password (empty if none)" "$(current_value TRANSMISSION_PASSWORD)"
+	ask "  RPC password (Enter if RPC auth is disabled)" \
+		"$(current_value TRANSMISSION_PASSWORD)"
 	set_env TRANSMISSION_PASSWORD "$ANSWER"
 
 	# --- Download dirs ---
 	echo
 	echo "-- Download folders (Plex) --"
-	ask_valid "  Base directory" "/volume2/downloads2" \
-		'^/[A-Za-z0-9._/-]*$' "absolute path with ASCII characters only"
+	echo "   Six folders (Movies/Series/Anime/Audiobooks/Music/Soft) go under it."
+	ask_valid "  Base directory" \
+		"$(parent_of "$(default_or DOWNLOAD_DIR_MOVIES /volume2/downloads2/Movies)")" \
+		'^/[A-Za-z0-9._/-]*$' "absolute path, ASCII only, e.g. /volume2/downloads2"
 	BASE_DIR_DL="$ANSWER"
 	set_env DOWNLOAD_DIR_MOVIES "$BASE_DIR_DL/Movies"
 	set_env DOWNLOAD_DIR_SERIES "$BASE_DIR_DL/Series"
@@ -314,9 +349,9 @@ configure_env() {
 
 	# --- Trackers ---
 	echo
-	echo "-- Tracker accounts (used by /login_rutracker and /login_kinozal) --"
-	echo "   NOTE: input is visible on screen."
-	ask "  rutracker login (empty to skip)" "$(current_value RUTRACKER_LOGIN)"
+	echo "-- Tracker accounts (for /login_rutracker and /login_kinozal) --"
+	echo "   Optional: leave empty to fill later; input is visible on screen."
+	ask "  rutracker login (Enter to skip)" "$(current_value RUTRACKER_LOGIN)"
 	set_env RUTRACKER_LOGIN "$ANSWER"
 	ask "  rutracker password" "$(current_value RUTRACKER_PASSWORD)"
 	set_env RUTRACKER_PASSWORD "$ANSWER"
