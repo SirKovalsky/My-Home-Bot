@@ -1,3 +1,5 @@
+# Для современного Python (3.10+). Для DSM 6.2 / Python 3.8 используйте
+# requirements-dsm6.txt — см. README, раздел про установку на Xpenology.
 aiogram>=3.7,<4
 # requests + PySocks: PySocks обязателен для схем socks5h:// в параметре proxies.
 requests[socks]>=2.31

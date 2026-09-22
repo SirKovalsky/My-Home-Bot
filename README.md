@@ -29,7 +29,9 @@
 torrent-bot/
 ├── .env.example              # шаблон конфигурации
 ├── .gitignore
-├── requirements.txt
+├── .gitattributes
+├── requirements.txt          # зависимости для Python 3.10+
+├── requirements-dsm6.txt     # зависимости для Python 3.8 (DSM 6.2)
 ├── README.md
 ├── bot.py                    # точка входа, aiogram
 ├── config.py                 # чтение .env (единственное место с прокси-словарём)
@@ -63,6 +65,16 @@ DSM 6.2 основан на **systemd**, поэтому самый удобны�
    Python 3.8, ставится в `/var/packages/py3k/target/usr/local/bin/python3`).
    Альтернатива — пакет `python3` из **SynoCommunity** (репозиторий
    `https://packages.synocommunity.com`).
+
+> ⚠️ **Про версию Python на DSM 6.2.** Штатный пакет Synology — это **Python 3.8**,
+> а актуальные `aiogram` (≥3.14), `requests` (≥2.33) и `python-dotenv` (≥1.1)
+> требуют **Python ≥3.10/3.9**. Поэтому для 3.8 в репозитории лежит отдельный
+> `requirements-dsm6.txt` с последними совместимыми версиями, а `install.sh`
+> выбирает его автоматически. Вручную тогда:
+> `.venv/bin/pip install -r requirements-dsm6.txt`.
+> Хотите свежие библиотеки — поставьте новый Python из SynoCommunity
+> (например, `python311`) и укажите его при установке:
+> `PYTHON=/var/packages/python311/target/usr/local/bin/python3 sudo -E sh deploy/install.sh`.
 3. *(опционально)* **Git** — тоже из Package Center / SynoCommunity, если хотите
    деплоить через `git pull`.
 
@@ -123,7 +135,10 @@ PY=/var/packages/py3k/target/usr/local/bin/python3
 
 $PY -m venv .venv          # если падает без ensurepip — см. примечание ниже
 .venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+# Python 3.8 (штатный на DSM 6.2):
+.venv/bin/pip install -r requirements-dsm6.txt
+# ...либо, если у вас Python 3.9+:
+# .venv/bin/pip install -r requirements.txt
 cp .env.example .env && nano .env
 .venv/bin/python bot.py
 ```
@@ -152,7 +167,53 @@ exec ./.venv/bin/python bot.py >> /volume1/torrent-bot/torrent-bot.log 2>&1
 
 Минус: нет автоперезапуска при падении — это даёт только systemd-юнит.
 
-### 2.4. Запуск из исходников на другой ОС (Linux/macOS)
+### 2.4. Настройка Transmission RPC на DSM (перед первым запуском бота)
+
+Бот общается с Transmission по `127.0.0.1:9091`, поэтому RPC должен быть включён.
+
+**SynoCommunity `transmission`** — включите RPC в настройках пакета
+(*Package Center → transmission → RPC*), либо прямо в `settings.json`:
+
+```bash
+# путь у SynoCommunity-пакета:
+sudo vi /volume1/@appstore/transmission/var/settings.json
+```
+
+Ключевые поля:
+
+```jsonc
+{
+  "rpc-enabled": true,
+  "rpc-bind-address": "127.0.0.1",   // ТОЛЬКО localhost, наружу не светим
+  "rpc-port": 9091,
+  "rpc-whitelist-enabled": true,
+  "rpc-whitelist": "127.0.0.1",
+  "rpc-username": "",                 // если зададите — продублируйте в .env
+  "rpc-password": ""                  // Transmission хранит его в виде хэша
+}
+```
+
+Затем перезапустите пакет (Package Center → transmission → Restart) и проверьте:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9091/transmission/rpc
+# 409 — норма (нужен заголовок X-Transmission-Session-Id), 200 тоже ок
+```
+
+Если `rpc-username`/`rpc-password` заполнены — укажите их в `.env`
+(`TRANSMISSION_USER` / `TRANSMISSION_PASSWORD`).
+
+> **Про пользователя бота.** `deploy/install.sh` по умолчанию ставит
+> `User=root` — так проще всего и работает всегда (pid-файлы не нужны).
+> Если хотите строже, используйте `BOT_USER=sc-transmission`, но тогда этот
+> пользователь должен иметь право писать в `/volume1/torrent-bot` (`.env`,
+> `cookies.*.pickle`, `torrent-bot.log`):
+> ```bash
+> sudo chown -R sc-transmission:users /volume1/torrent-bot
+> sudo BOT_USER=sc-transmission sh deploy/install.sh
+> ```
+
+### 2.5. Запуск из исходников на другой ОС (Linux/macOS)
 
 ```bash
 python3 -m venv .venv
@@ -400,6 +461,8 @@ PY
 | Симптом в логе/чате | Причина и что делать |
 |---|---|
 | `Missing dependencies for SOCKS support` | не установлен PySocks → `pip install "requests[socks]"` |
+| `Could not find a version that satisfies the requirement aiogram` / `requires a different Python` | Python 3.8 на DSM 6.2 и свежие версии библиотек → ставьте `requirements-dsm6.txt` (или новый Python из SynoCommunity) |
+| `python3: command not found` | используйте полный путь `/var/packages/py3k/target/usr/local/bin/python3` |
 | `Прокси ... недоступен` | OpenWrt не слушает LAN, порт закрыт firewall или неверный `PROXY_URL` (см. раздел 4) |
 | `Обнаружена капча/антибот` | трекер требует капчу; подождите, смените UA/прокси, проверьте логин |
 | `rutracker не выдал cookie bb_session` | неверный логин/пароль, либо нужен вход через браузер (проверьте данные в `.env`) |

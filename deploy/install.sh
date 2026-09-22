@@ -72,8 +72,27 @@ VENV_PY="$INSTALL_DIR/.venv/bin/python"
 
 log "Устанавливаю зависимости..."
 "$VENV_PY" -m pip install --quiet --upgrade pip
-"$VENV_PY" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
-log "Зависимости установлены."
+
+# На DSM 6.2 штатный Python — 3.8, а свежие aiogram/requests требуют 3.10+.
+# Для 3.8 берём заранее подготовленный файл с совместимыми версиями.
+PY_VERSION=$("$VENV_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
+PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
+
+if [ "$PY_MAJOR" -gt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -ge 9 ]; }; then
+	REQ_FILE="$INSTALL_DIR/requirements.txt"
+else
+	REQ_FILE="$INSTALL_DIR/requirements-dsm6.txt"
+	log "Python $PY_VERSION (DSM 6.2) — совместимые версии из requirements-dsm6.txt"
+fi
+
+if [ ! -f "$REQ_FILE" ]; then
+	err "Не найден файл зависимостей: $REQ_FILE"
+	exit 1
+fi
+
+"$VENV_PY" -m pip install --quiet -r "$REQ_FILE"
+log "Зависимости установлены ($(basename "$REQ_FILE"))."
 
 # PySocks — критично для socks5h://. Проверяем явно.
 if ! "$VENV_PY" -c 'import socks' 2>/dev/null; then
