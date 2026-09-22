@@ -262,8 +262,15 @@ class BaseTracker(ABC):
     @staticmethod
     def _check_captcha(response: requests.Response) -> None:
         if response.status_code in (403, 429):
+            # Показываем начало ответа: по нему видно, это капча, бан IP,
+            # требование авторизации или бан User-Agent.
+            try:
+                snippet = clean_html((response.text or "")[:4000])[:200]
+            except Exception:  # noqa: BLE001
+                snippet = ""
+            detail = f" Ответ сервера: {snippet!r}" if snippet else ""
             raise CaptchaError(
-                f"Трекер отдал {response.status_code} (вероятно, антибот/капча или бан UA)"
+                f"Трекер отдал {response.status_code}.{detail}"
             )
         content_type = response.headers.get("Content-Type", "")
         if "text/html" not in content_type:
