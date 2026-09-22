@@ -152,16 +152,6 @@ parent_of() {
 	esac
 }
 
-# Configured = a real bot token plus a PROXY_URL that is not localhost
-# (localhost would mean "on this NAS", which is always wrong for the proxy).
-is_configured() {
-	_tok="$(current_value TELEGRAM_BOT_TOKEN)"
-	case "$_tok" in ""|123456:*) return 1 ;; esac
-	_url="$(current_value PROXY_URL)"
-	case "$_url" in ""|*127.0.0.1*|*localhost*) return 1 ;; esac
-	return 0
-}
-
 set_env() {
 	# Robust in-place update. Values may contain / : + = and even non-UTF-8
 	# bytes: on DSM the locale is usually "C", so Python decodes argv with
@@ -254,16 +244,18 @@ configure_env() {
 	cur_token="$(current_value TELEGRAM_BOT_TOKEN)"
 	if is_placeholder "$cur_token"; then cur_token=""; fi
 
-	if is_configured; then
-		printf 'Existing .env looks configured. Re-run the setup to review values? [y/N]: '
-		read -r _again || _again=""
-		case "$_again" in
-			[Yy]*) ;;
-			*) log "Keeping the existing .env unchanged."; return 0 ;;
-		esac
-	else
-		log "Some required values are still missing - let's fill them in."
-	fi
+	echo
+	log "Settings currently in $ENV_FILE:"
+	echo "    PROXY_URL           : $(current_value PROXY_URL)"
+	echo "    TRANSMISSION        : $(current_value TRANSMISSION_HOST):$(current_value TRANSMISSION_PORT)"
+	echo "    TELEGRAM_BOT_TOKEN  : $(mask "$(current_value TELEGRAM_BOT_TOKEN)")"
+	echo "    ALLOWED_USER_IDS    : $(current_value ALLOWED_USER_IDS)"
+	echo "    DOWNLOAD_DIR_MOVIES : $(current_value DOWNLOAD_DIR_MOVIES)"
+	printf 'Review and change them now? [Y/n]: '
+	read -r _again || _again=""
+	case "$_again" in
+		[Nn]*) log "Keeping the existing .env unchanged."; return 0 ;;
+	esac
 
 	echo
 	log "Interactive setup. Press Enter to keep the value in brackets."
