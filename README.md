@@ -896,7 +896,78 @@ PY
 
 ---
 
-## 8. Что сознательно НЕ делается
+## 8. Диагностика: Cloudflare и блокировка по SNI
+
+Если `/search` отвечает «Ничего не нашлось» и в тексте мелькает
+`Just a moment...`, а прямой запрос виснет — это **не баг бота**. Ниже
+зафиксирован разбор реального случая, чтобы не проходить его заново.
+
+### Два независимых ограничения
+
+| Что мешает | Симптом | Причина |
+|---|---|---|
+| Блокировка у провайдера | TCP до Cloudflare открывается, а HTTPS **висит** до таймаута | DPI рвёт соединение по имени сайта в `SNI` (ClientHello не шифрован) |
+| Cloudflare-челлендж | `403` с телом `Just a moment...` | выходной IP — серверный/датацентровый (VPS, WARP), Cloudflare его не пускает |
+
+Как проверить каждое:
+
+```bash
+# 1) DNS и TCP (без TLS) — заработает даже при блокировке по SNI
+cd /volume1/My-Home-Bot
+.venv/bin/python - <<'PY'
+import socket
+for host in ("rutracker.org", "kinozal.me"):
+    try:
+        print(host, "DNS ->", socket.gethostbyname(host))
+    except Exception as e:
+        print(host, "DNS FAIL:", e); continue
+    for port in (443, 80):
+        try:
+            s = socket.create_connection((host, port), timeout=5); print("  ", port, "OK"); s.close()
+        except Exception as e:
+            print("  ", port, type(e).__name__, e)
+PY
+
+# 2) полный путь через прокси + при желании cookies
+sudo .venv/bin/python deploy/test_trackers.py интерстеллар
+```
+
+`TCP OK` + `HTTPS timeout` = блокировка по SNI. `403 Just a moment` = челлендж.
+
+### Почему браузер на телефоне работает, а бот нет
+
+Браузер проходит челлендж, **выполняя JavaScript** (и получает cookie
+`cf_clearance`). Бот JS не исполняет, поэтому упирается. Плюс DNS/SNI
+блокировки его не касаются, потому что он ходит через VPS.
+
+### Что действительно решает
+
+1. **HTTP/3 (QUIC) напрямую с домашнего канала.** В QUIC `SNI` зашифрован,
+   поэтому DPI его не видит, и запрос уходит **с резидентного IP** — такие
+   Cloudflare не челленджит. Тогда `PROXY_URL=direct` и никаких прокси.
+   Требуется: UDP/443 не заблокирован, трекер отдаёт h3 (Cloudflare умеет),
+   и клиент с HTTP/3. В wheel `curl_cffi` QUIC **не собран** —
+   `http_version=V3` падает с `curl: (1)`; нужна сборка curl с `ngtcp2`
+   либо `aioquic`.
+   Проверка: `.venv/bin/python deploy/test_trackers.py ИМЯ` при `PROXY_URL=direct`.
+2. **Выходной узел с «чистой» репутацией IP.** Челлендж зависит от адреса:
+   другой сервер/локация может пройти без всяких ухищрений. Быстрая проверка —
+   переключить узел в v2rayA и снова прогнать `test_trackers.py`.
+3. **Обход через телефон** (работает всегда): `/search` показывает кнопки
+   «🔎 Искать на rutracker / kinozal», они открывают результаты в браузере
+   телефона; скачанный `.torrent` (или magnet) отправляется боту, и он сам
+   делает категорию, папку и Transmission.
+
+### Чего делать не стоит
+
+- WARP и другие VPN не помогают: их адреса Cloudflare метит так же, как VPS.
+- Импорт cookies (`/cookies`) работает, но `cf_clearance` привязан к паре
+  **IP + User-Agent** и живёт недолго; с телефона его корректно достать
+  практически нельзя. Решение оставлено в коде на случай светлого будущего.
+
+---
+
+## 9. Что сознательно НЕ делается
 
 - ❌ iptables/nftables на OpenWrt и Xpenology;
 - ❌ заворачивание Transmission (и P2P) в прокси;
