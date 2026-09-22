@@ -289,7 +289,7 @@ python bot.py
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | токен от [@BotFather](https://t.me/BotFather) |
 | `ALLOWED_USER_IDS` | ваш Telegram user id (можно несколько через запятую). Пусто = доступ всем — **не рекомендуется** |
-| `TELEGRAM_PROXY_URL` | HTTP-прокси **только для Bot API**, если `api.telegram.org` заблокирован. Пусто = напрямую. Пример: `http://172.50.16.24:1081`. SOCKS здесь не поддерживается (потребовал бы пакет `aiohttp-socks`) |
+| `TELEGRAM_PROXY_URL` | HTTP-прокси **только для Bot API**, если `api.telegram.org` заблокирован. Пусто = напрямую. Пример: `http://192.168.1.2:1081`. SOCKS здесь не поддерживается (потребовал бы пакет `aiohttp-socks`) |
 
 ### Прокси (только для трекеров!)
 | Переменная | Описание |
@@ -545,6 +545,9 @@ JSON
 
 Автозапуск — init-скрипт из репозитория:
 
+> Если SSH на роутере слушает нестандартный порт, укажите его явно:
+> `scp -P <port> ...` и `ssh -p <port> ...`. В репозитории порт не хардкодится.
+
 ```bash
 scp deploy/openwrt/xray-socks-lan.init root@192.168.1.2:/etc/init.d/xray-socks-lan
 ssh root@192.168.1.2
@@ -575,7 +578,7 @@ PROXY_URL=socks5h://192.168.1.2:1080
 `aiohttp-socks`, а HTTP поддерживает «из коробки». Тогда в `.env`:
 
 ```env
-TELEGRAM_PROXY_URL=http://172.50.16.24:1081
+TELEGRAM_PROXY_URL=http://192.168.1.2:1081
 ```
 
 ### Способ C: проброс порта (`socat`/`ncat`)
