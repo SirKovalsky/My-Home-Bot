@@ -46,7 +46,8 @@ torrent-bot/
 │   └── torrent_parser.py     # bencode-разбор, категория, download-dir
 └── deploy/                   # развёртывание на DSM 6.2
     ├── install.sh            # venv + зависимости + systemd-юнит
-    └── torrent-bot.service   # шаблон systemd-юнита
+    ├── torrent-bot.service   # шаблон systemd-юнита
+    └── check_proxy.py        # диагностика прокси/Transmission без nc и curl
 ```
 
 ---
@@ -193,11 +194,19 @@ sudo vi /volume1/@appstore/transmission/var/settings.json
 }
 ```
 
-Затем перезапустите пакет (Package Center → transmission → Restart) и проверьте:
+Затем перезапустите пакет (Package Center → transmission → Restart) и проверьте.
+На DSM нет `curl`, поэтому проверяем питоном из venv проекта:
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9091/transmission/rpc
-# 409 — норма (нужен заголовок X-Transmission-Session-Id), 200 тоже ок
+cd /volume1/torrent-bot
+.venv/bin/python - <<'PY'
+import requests
+s = requests.Session()
+s.trust_env = False          # игнорировать HTTP_PROXY/HTTPS_PROXY из окружения
+s.proxies = {}               # прокси нет
+r = s.get("http://127.0.0.1:9091/transmission/rpc", timeout=10)
+print("HTTP", r.status_code, "- 409 или 200 означают, что RPC жив")
+PY
 ```
 
 Если `rpc-username`/`rpc-password` заполнены — укажите их в `.env`
@@ -237,7 +246,7 @@ python bot.py
 ### Прокси (только для трекеров!)
 | Переменная | Описание |
 |---|---|
-| `PROXY_URL` | адрес прокси на OpenWrt. **Используйте `socks5h://`** — тогда DNS резолвит сам прокси. Пример: `socks5h://192.168.1.2:1080` |
+| `PROXY_URL` | SOCKS5-вход на OpenWrt. **Используйте `socks5h://`** — тогда DNS резолвит сторона прокси. Пример: `socks5h://192.168.1.2:20170` |
 | `PROXY_TIMEOUT` | таймаут запросов к трекерам, сек (по умолчанию 30) |
 
 ### Transmission (без прокси)
@@ -356,7 +365,27 @@ if t.Setting.PortSharing { listenAddr = "0.0.0.0" }
 netstat -lnpt | grep 20170     # ждём 0.0.0.0:20170, а не 127.0.0.1:20170
 ```
 
-### 4.3.1. Вариант надёжнее — Custom Inbound
+> **Если опции Port sharing в старой LuCI-сборке нет** — не обязательно её
+> искать. v2rayA всё равно слушает SOCKS5 на `127.0.0.1:20170` самого OpenWrt,
+> и достаточно пробросить этот порт в LAN обычным TCP-форвардером:
+>
+> ```bash
+> opkg update && opkg install socat
+> socat TCP-LISTEN:20170,fork,reuseaddr TCP:127.0.0.1:20170
+> ```
+>
+> Это не проксирование и не перехват — просто локальный проброс порта на самом
+> OpenWrt, без правок правил маршрутизации. Чтобы проброс поднимался при загрузке,
+> добавьте строку в `/etc/rc.local` (перед `exit 0`).
+>
+> В `.env` всё равно указывайте адрес OpenWrt и этот порт:
+> `socks5h://<IP_OpenWrt>:20170`.
+
+### 4.3.1. Вариант надёжнее — Custom Inbound (только в новых версиях)
+
+> ⚠️ В **старых LuCI-сборках** v2rayA этого пункта в панели нет — тогда
+> используйте встроенный SOCKS5-порт из п. 4.3 (при необходимости + проброс
+> через `socat`). Ниже — для тех, у кого v2rayA 2.3+.
 
 В свежих версиях v2rayA есть **Custom Inbound**: свой SOCKS/HTTP-вход на
 заданном порту с **явной привязкой к исходящему узлу**. Это гарантирует, что
@@ -409,21 +438,32 @@ WAN, если он не изолирован. Если хотите ограни
 `PROXY_URL` на WireGuard: боту нужен именно SOCKS5 к выходному узлу. P2P-трафик
 Transmission и так идёт напрямую и в туннель не попадает.
 
-### 4.6. Проверка с Xpenology
+### 4.6. Проверка с Xpenology (без nc и curl)
+
+На DSM нет ни `nc`, ни `curl`, поэтому проверяем питоном из venv проекта:
 
 ```bash
-# TCP-доступность входа
-nc -vz <IP_OpenWrt> 20170
-
-# запрос через SOCKS5 — должен вернуть внешний IP удалённого сервера, а не ваш
-curl -x socks5h://<IP_OpenWrt>:20170 https://api.ipify.org; echo
-
-# а прямой запрос — IP провайдера
-curl https://api.ipify.org; echo
+cd /volume1/torrent-bot
+sudo .venv/bin/python deploy/check_proxy.py
 ```
 
-Если через `-x` видите IP удалённого сервера, а без него — свой провайдерский,
-всё настроено верно. В `.env` пишите ровно:
+Скрипт `deploy/check_proxy.py` делает всё сразу: TCP до SOCKS-порта, запрос через
+прокси и напрямую (сравнивает IP), доступность трекеров через прокси и ответ
+Transmission. Пример успешного вывода:
+
+```
+[OK  ] 1) TCP до прокси 192.168.1.2:20170
+[OK  ] 2) Выход через прокси
+        HTTP 200, внешний IP через прокси: 203.0.113.7
+[OK  ] 3) Выход напрямую (для сравнения)
+        HTTP 200, прямой внешний IP: 198.51.100.23
+[OK  ] 4) Трекеры через прокси
+        https://rutracker.org/forum/index.php -> HTTP 200
+[OK  ] 5) Transmission напрямую
+```
+
+Если IP в пунктах 2 и 3 **разные** — трекеры идут через туннель, всё верно.
+В `.env` пишите ровно:
 
 ```env
 PROXY_URL=socks5h://<IP_OpenWrt>:20170
@@ -458,19 +498,27 @@ ss -tnp | grep transmission
 ```
 
 Ожидаемая картина: соединения с **внешними IP пиров/трекеров** (порты 51413,
-443, 80). **Не должно быть** устойчивых соединений с `192.168.1.2:1080/8118`
-(адресом прокси OpenWrt) — их и не будет, потому что Transmission работает
+443, 80). **Не должно быть** устойчивых соединений с `<IP_OpenWrt>:20170`
+(адресом SOCKS-входа v2rayA) — их и не будет, потому что Transmission работает
 напрямую.
 
 ### 5.2. Проверить, что RPC доступен без прокси
 
-```bash
-# RPC отвечает напрямую, БЕЗ -x/--socks
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9091/transmission/rpc
-# 409 или 200 = ок (409 = нужен X-Transmission-Session-Id, это норма)
+На DSM нет `curl`, поэтому проверяем питоном из venv проекта:
 
-# а с прокси НЕ должно требоваться:
-curl --noproxy '*' -sI http://127.0.0.1:9091/transmission/rpc
+```bash
+cd /volume1/torrent-bot
+.venv/bin/python - <<'PY'
+import requests
+
+# Строго БЕЗ прокси и БЕЗ учёта HTTP_PROXY/HTTPS_PROXY из окружения —
+# ровно как клиент Transmission в боте.
+s = requests.Session()
+s.trust_env = False
+s.proxies = {}
+r = s.get("http://127.0.0.1:9091/transmission/rpc", timeout=10)
+print("HTTP", r.status_code, "- 409 или 200 = RPC отвечает напрямую")
+PY
 ```
 
 ### 5.3. Убедиться, что в окружении нет глобального прокси
@@ -484,19 +532,32 @@ env | grep -i proxy        # должно быть пусто
 
 ### 5.4. Проверить, что трекеры идут **через** прокси
 
+Проще всего — встроенной проверкой (не нужны ни `curl`, ни `nc`):
+
 ```bash
-python - <<'PY'
+cd /volume1/torrent-bot
+sudo .venv/bin/python deploy/check_proxy.py
+```
+
+Скрипт проверит TCP до прокси, выход через прокси и напрямую (сравните IP!),
+доступность `rutracker.org`/`kinozal.me` через прокси и ответ Transmission RPC.
+Если IP через прокси отличается от прямого и совпадает с удалённым сервером —
+маршрутизация трекеров корректна.
+
+То же самое вручную:
+
+```bash
+cd /volume1/torrent-bot
+.venv/bin/python - <<'PY'
 import requests
 s = requests.Session()
 # как в боте: явный прокси + игнор окружения
-s.proxies.update({"http": "socks5h://192.168.1.2:1080",
-                  "https": "socks5h://192.168.1.2:1080"})
+s.proxies.update({"http": "socks5h://<IP_OpenWrt>:20170",
+                  "https": "socks5h://<IP_OpenWrt>:20170"})
 s.trust_env = False
-print(s.get("https://api.ipify.org", timeout=20).text)   # IP прокси
+print("через прокси:", s.get("https://api.ipify.org", timeout=20).text)
 PY
 ```
-
-Если IP совпадает с прокси OpenWrt — маршрутизация трекеров корректна.
 
 ---
 
