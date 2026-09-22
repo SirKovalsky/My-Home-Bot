@@ -654,27 +654,55 @@ sharing (см. 4.3).
 SOCKS5-порт из п. 4.3 и просто убедитесь, что режим правил (Proxy Mode) отправляет
 `rutracker.org` / `kinozal.me` через прокси, а не напрямую.
 
-### 4.4. Firewall
+### 4.4. Выбор порта и firewall
 
-В дефолтной OpenWrt зона **lan** имеет `input ACCEPT`, поэтому отдельное правило
-обычно **не нужно** — Xpenology просто достучится до `<IP_OpenWrt>:<SOCKS_PORT>`
-(например `:20170`). Правило добавьте только если вы ужесточали firewall:
+**Сначала выберите свободные порты.** На OpenWrt легко наткнуться на уже занятый
+порт — например, проброс (DNAT) 1080 на какой-нибудь сервис:
+
+```bash
+netstat -lnpt | grep -E '<SOCKS_PORT>|<HTTP_PORT>'
+uci show firewall | grep -E 'redirect|dest_port'
+```
+
+Если порт занят пробросом или другим сервисом, возьмите свободные — например
+`11080` (SOCKS) и `11081` (HTTP) — и поправьте их в конфиге xray и в `.env`.
+
+**Теперь про firewall.** Всё зависит от того, с какой стороны приходит NAS:
+
+- **NAS в той же подсети, что LAN-интерфейс OpenWrt** (`br-lan`, обычно
+  `192.168.1.0/24`) — зона `lan` по умолчанию имеет `input ACCEPT`, правило не
+  нужно.
+- **NAS — отдельный узел за главным роутером** (как в этой сборке: NAS
+  `172.16.50.21`, а OpenWrt `172.16.50.24` живёт на интерфейсе с именем `wan`).
+  Тогда пакеты приходят в зону `wan`, где вход по умолчанию **закрыт**, и нужен
+  явный ACCEPT на адрес NAS:
 
 ```bash
 uci add firewall rule
-uci set firewall.@rule[-1].name='Allow-SOCKS-from-LAN'
-uci set firewall.@rule[-1].src='lan'
+uci set firewall.@rule[-1].name='Allow-NAS-proxy'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].src_ip='<IP_NAS>'
 uci set firewall.@rule[-1].proto='tcp'
-uci set firewall.@rule[-1].dest_port='20170'
+uci set firewall.@rule[-1].dest_port='<SOCKS_PORT> <HTTP_PORT>'
 uci set firewall.@rule[-1].target='ACCEPT'
 uci commit firewall
 /etc/init.d/firewall restart
 ```
 
-Учтите: `Port sharing` открывает вход на **всех** интерфейсах OpenWrt, включая
-WAN, если он не изолирован. Если хотите ограничиться LAN — не полагайтесь на
-`0.0.0.0`, а закройте WAN-вход правилом из этого раздела (src `wan`, target
-`REJECT`) или задайте `Username`/`Password` в Custom Inbound.
+Это обычный ACCEPT для конкретного источника и портов — не прозрачное
+проксирование и не изменение маршрутизации.
+
+**Как читать ошибки при проверке портов с NAS:**
+
+| Результат | Что означает |
+|---|---|
+| `timeout` | пакеты до роутера не доходят: неверный адрес или нет правила firewall |
+| `ConnectionRefusedError` | пакет дошёл, firewall пустил, но **никто не слушает** (инстанс xray не поднялся / не тот порт) |
+| `OK` | порт открыт и слушается |
+
+> Отдельно: `Port sharing` в v2rayA открывает вход на всех интерфейсах, включая
+> WAN. Если это нежелательно, задайте `Username`/`Password` в Custom Inbound
+> либо не используйте Port sharing вовсе (см. 4.3).
 
 ### 4.5. WireGuard-сервер — не для бота
 
