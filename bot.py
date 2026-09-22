@@ -307,6 +307,9 @@ async def cmd_start(message: Message) -> None:
         "/stats — суммарная статистика\n"
         "/dirs — показать список папок\n"
         "/help — эта справка\n\n"
+        "<i>Если /search ругается на Cloudflare — это ограничение серверного IP. "
+        "Тогда просто пришлите .torrent или magnet из браузера телефона, "
+        "остальное бот сделает сам.</i>\n\n"
         f"<i>Прокси для трекеров:</i> <code>{CONFIG.proxy_url}</code>\n"
         f"<i>Transmission:</i> <code>{CONFIG.transmission_host}:"
         f"{CONFIG.transmission_port}</code> (без прокси)",
@@ -474,7 +477,9 @@ async def _run_search(message: Message, query: str) -> None:
 
     if not results:
         text = "🤷 Ничего не нашлось."
-        if errors:
+        if any("just a moment" in err.lower() for err in errors):
+            text += "\n\n" + CLOUDFLARE_HINT
+        elif errors:
             text += "\n\n" + "\n".join(errors)
         return await status.edit_text(text)
 
@@ -689,6 +694,8 @@ async def on_pick_result(callback: CallbackQuery) -> None:
     except NotLoggedInError as exc:
         return await _edit(callback, f"🔑 {exc}")
     except CaptchaError as exc:
+        if _is_cloudflare(exc):
+            return await _edit(callback, CLOUDFLARE_HINT)
         return await _edit(callback, f"🤖 {exc}")
     except ProxyUnavailableError as exc:
         return await _edit(callback, f"🔌 Прокси недоступен: {exc}")
@@ -832,6 +839,8 @@ async def process_tracker_url(message: Message, tracker_name: str, url: str) -> 
             f"🔑 {exc}\nВыполните /login_{tracker_name} и повторите."
         )
     except CaptchaError as exc:
+        if _is_cloudflare(exc):
+            return await status.edit_text(CLOUDFLARE_HINT)
         return await status.edit_text(f"🤖 {exc}")
     except ProxyUnavailableError as exc:
         return await status.edit_text(
@@ -1111,6 +1120,21 @@ async def on_shutdown(bot: Bot) -> None:
 
 def _escape(text: str) -> str:
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+CLOUDFLARE_HINT = (
+    "☁️ Трекер отдал Cloudflare-проверку, которую проходит только браузер: "
+    "бот выходит с серверного IP.\n\n"
+    "Что делать прямо сейчас:\n"
+    "1) открой раздачу в браузере на телефоне (там проверка проходится сама);\n"
+    "2) пришли боту <b>.torrent</b> файлом или <b>magnet</b>-ссылку — "
+    "категорию, папку и Transmission бот сделает сам."
+)
+
+
+def _is_cloudflare(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "just a moment" in text or "cloudflare" in text
 
 
 # --------------------------------------------------------------------------- #
