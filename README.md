@@ -44,10 +44,12 @@ torrent-bot/
 ├── utils/
 │   ├── __init__.py
 │   └── torrent_parser.py     # bencode-разбор, категория, download-dir
-└── deploy/                   # развёртывание на DSM 6.2
-    ├── install.sh            # venv + зависимости + systemd-юнит
-    ├── torrent-bot.service   # шаблон systemd-юнита
-    └── check_proxy.py        # диагностика прокси/Transmission без nc и curl
+└── deploy/                   # развёртывание
+    ├── install.sh            # venv + зависимости + systemd-юнит (DSM 6.2)
+    ├── torrent-bot.service   # шаблон systemd-юнита (DSM 6.2)
+    ├── check_proxy.py        # диагностика прокси/Transmission без nc и curl
+    └── openwrt/
+        └── socks-lan.init    # проброс SOCKS5 v2rayA в LAN (socat, procd)
 ```
 
 ---
@@ -351,35 +353,77 @@ listenAddr := "127.0.0.1"
 if t.Setting.PortSharing { listenAddr = "0.0.0.0" }
 ```
 
-Поэтому Xpenology по умолчанию до SOCKS5-порта **не достучится** — он виден
-только с самого OpenWrt. Нужно в панели v2rayA:
+Поэтому по умолчанию SOCKS5-вход виден **только с самого OpenWrt**, и Xpenology
+до него не достучится. Точные порты у вас видны в панели
+(*Setting → Address and Ports*):
 
-1. Включить **Port sharing** (в интерфейсе — «共享端口» / Port sharing).
-2. Задать **ненулевой SOCKS5-порт** (обычно 20170; HTTP — 20171; порт `0` = вход
-   не создаётся вообще).
-3. Сохранить/применить настройки.
+| Поле | Значение |
+|---|---|
+| Port of SOCKS5 | `20170` |
+| Port of HTTP | `20171` |
+| Port of SOCKS5 (with Rule) | `0` (закрыт) |
+| Port of HTTP (with Rule) | `20172` |
 
-После этого должно появиться:
+### Почему НЕ включаем «Port Sharing»
+
+Кнопка **Port Sharing** действительно переключает входы на `0.0.0.0` (в коде
+v2rayA: `if PortSharing { listenAddr = "0.0.0.0" }`). Но в интерфейсе она стоит
+рядом с `IP Forward` под «Transparent Proxy/System Proxy» — то есть это
+**альтернативный режим реализации прозрачного прокси**, а не безобидный флаг
+«открыть порт». Его включение меняет схему перехвата для **всех** клиентов,
+ходящих через OpenWrt, — отсюда и поломки, с которыми вы воевали.
+
+Нам оно не нужно.
+
+### Рекомендуемый способ: проброс порта на LAN через `socat`
+
+v2rayA оставляем ровно как есть (она слушает `127.0.0.1:20170`), а наружу порт
+отдаём обычным TCP-форвардером, **привязанным к LAN-адресу OpenWrt**:
 
 ```bash
-netstat -lnpt | grep 20170     # ждём 0.0.0.0:20170, а не 127.0.0.1:20170
+opkg update && opkg install socat
+
+# разовый запуск для проверки (подставьте свой LAN-адрес OpenWrt):
+socat TCP-LISTEN:20170,bind=192.168.1.2,fork,reuseaddr TCP:127.0.0.1:20170
 ```
 
-> **Если опции Port sharing в старой LuCI-сборке нет** — не обязательно её
-> искать. v2rayA всё равно слушает SOCKS5 на `127.0.0.1:20170` самого OpenWrt,
-> и достаточно пробросить этот порт в LAN обычным TCP-форвардером:
->
-> ```bash
-> opkg update && opkg install socat
-> socat TCP-LISTEN:20170,fork,reuseaddr TCP:127.0.0.1:20170
-> ```
->
+`bind=192.168.1.2` — принципиально: слушаем **только LAN-интерфейс**, поэтому в
+WAN порт не торчит и firewall трогать не нужно.
+
+Чтобы проброс поднимался при загрузке, используйте готовый init-скрипт из
+репозитория (он под procd, с автоперезапуском):
+
+```bash
+# в deploy/openwrt/socks-lan.init при необходимости поменяйте LAN_IP
+scp deploy/openwrt/socks-lan.init root@192.168.1.2:/etc/init.d/socks-lan
+ssh root@192.168.1.2
+chmod +x /etc/init.d/socks-lan
+/etc/init.d/socks-lan enable
+/etc/init.d/socks-lan start
+logread -e socks-lan          # смотрим, что поднялось
+```
+
+Проверка на OpenWrt, что порт слушается в LAN:
+
+```bash
+netstat -lnpt | grep 20170    # ждём 192.168.1.2:20170 (не 127.0.0.1 и не 0.0.0.0)
+```
+
+В `.env` указывайте адрес OpenWrt и этот порт:
+
+```env
+PROXY_URL=socks5h://192.168.1.2:20170
+```
+
 > Это не проксирование и не перехват — просто локальный проброс порта на самом
-> OpenWrt, без правок правил маршрутизации. Чтобы проброс поднимался при загрузке,
-> добавьте строку в `/etc/rc.local` (перед `exit 0`).
->
-> В `.env` всё равно указывайте адрес OpenWrt и этот порт:
-> `socks5h://<IP_OpenWrt>:20170`.
+> OpenWrt. Прозрачный прокси, правила маршрутизации и остальные клиенты не
+> затрагиваются.
+
+> **Важно проверить маршрутизацию.** Порт `20170` — это обычный SOCKS5-вход,
+> и его трафик подчиняется общим правилам v2rayA (у вас `Traffic Splitting Mode
+> of Rule Port: RoutingA`). Если `deploy/check_proxy.py` покажет, что через
+> прокси внешний IP совпадает с провайдерским, — значит трафик уходит в `direct`,
+> и в правила v2rayA надо добавить `rutracker.org` / `kinozal.me` в проксируемые.
 
 ### 4.3.1. Вариант надёжнее — Custom Inbound (только в новых версиях)
 

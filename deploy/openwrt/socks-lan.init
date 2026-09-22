@@ -1,0 +1,47 @@
+#!/bin/sh /etc/rc.common
+# =============================================================================
+#  socks-lan — отдаёт SOCKS5-вход v2rayA (127.0.0.1:20170) в LAN OpenWrt.
+#
+#  Зачем: v2rayA по умолчанию слушает свои входы только на 127.0.0.1, а
+#  включать «Port Sharing» нежелательно — в v2rayA это другой режим реализации
+#  прозрачного прокси, который меняет перехват для ВСЕХ клиентов OpenWrt.
+#  Поэтому мы просто пробрасываем уже готовый SOCKS5-порт в LAN через socat,
+#  ничего не трогая в правилах маршрутизации и прозрачном прокси.
+#
+#  Установка на OpenWrt:
+#      opkg update && opkg install socat
+#      cp socks-lan.init /etc/init.d/socks-lan
+#      chmod +x /etc/init.d/socks-lan
+#      vi /etc/init.d/socks-lan        # при необходимости поправьте LAN_IP/SOCKS_PORT
+#      /etc/init.d/socks-lan enable
+#      /etc/init.d/socks-lan start
+#      logread -e socks-lan
+#
+#  Проверка:
+#      netstat -lnpt | grep 20170      # ждём <LAN_IP>:20170
+# =============================================================================
+
+START=99
+STOP=10
+USE_PROCD=1
+
+# >>> ОТРЕДАКТИРУЙТЕ ПОД СЕБЯ <<<
+# LAN-адрес самого OpenWrt (на нём будет слушать проброс).
+# Обязательно именно LAN-адрес, а не 0.0.0.0: так порт не окажется в WAN
+# и не потребует правил firewall.
+LAN_IP="192.168.1.2"
+
+# Порт SOCKS5 из v2rayA: Setting -> Address and Ports -> "Port of SOCKS5".
+SOCKS_PORT="20170"
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/bin/socat \
+		"TCP-LISTEN:${SOCKS_PORT},bind=${LAN_IP},fork,reuseaddr" \
+		"TCP:127.0.0.1:${SOCKS_PORT}"
+	# Автоподъём, если socat почему-то упадёт.
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
