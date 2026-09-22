@@ -484,24 +484,42 @@ EOF
 # Keep the bot alive without systemd: a cron job runs "start" every 5 minutes.
 # The rc.d script's start is idempotent (it checks the pidfile first), so a
 # healthy bot is left alone. Disable with WITH_CRON=0.
+# cron may live outside PATH on DSM; look in the usual places too.
+find_crontab() {
+	for c in /usr/syno/bin/crontab /usr/bin/crontab /bin/crontab /sbin/crontab; do
+		if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+	done
+	if command -v crontab >/dev/null 2>&1; then command -v crontab; return 0; fi
+	return 1
+}
+
 install_cron() {
 	[ "${WITH_CRON:-1}" = "1" ] || { log "cron watchdog disabled (WITH_CRON=0)"; return 0; }
-	command -v crontab >/dev/null 2>&1 || return 1
 	[ -n "${RCD_SCRIPT:-}" ] || return 1
+
+	CRONTAB_BIN="$(find_crontab)" || {
+		warn "crontab not found - no cron watchdog. Use DSM Task Scheduler instead:"
+		warn "  Control Panel -> Task Scheduler -> Create -> Scheduled Task, every 5 min,"
+		warn "  user root, command: $RCD_DIR/S99${SERVICE_NAME}.sh start"
+		return 1
+	}
 
 	MARK="# torrent-bot-watchdog"
 	LINE="*/5 * * * * $RCD_SCRIPT start >/dev/null 2>&1 $MARK"
 
-	CURRENT="$(crontab -l 2>/dev/null || true)"
+	CURRENT="$("$CRONTAB_BIN" -l 2>/dev/null || true)"
 	if printf '%s\n' "$CURRENT" | grep -Fq "$MARK"; then
 		log "cron watchdog already installed"
 		return 0
 	fi
 
-	{ printf '%s\n' "$CURRENT"; printf '%s\n' "$LINE"; } \
-		| grep -v '^[[:space:]]*$' | crontab - || return 1
+	if ! CRON_ERR="$({ printf '%s\n' "$CURRENT"; printf '%s\n' "$LINE"; } \
+			| grep -v '^[[:space:]]*$' | "$CRONTAB_BIN" - 2>&1)"; then
+		warn "crontab write failed: $CRON_ERR"
+		return 1
+	fi
 
-	log "cron watchdog installed: every 5 min runs '$RCD_SCRIPT start'"
+	log "cron watchdog installed via $CRONTAB_BIN: every 5 min runs '$RCD_SCRIPT start'"
 	# Ask cron to reload; usually it notices the change by itself.
 	synoservice --restart crond >/dev/null 2>&1 \
 		|| /etc/init.d/crond restart >/dev/null 2>&1 \

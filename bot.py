@@ -22,7 +22,7 @@ import sys
 import time
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, cast
 from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -31,6 +31,9 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command
+from aiogram.methods import TelegramMethod
+from aiogram.methods.base import TelegramType
+from aiohttp import ClientError
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -60,6 +63,71 @@ else:  # Python 3.8 fallback
     async def to_thread(func, *args, **kwargs):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+
+class ProxiedAiohttpSession(AiohttpSession):
+    """AiohttpSession, отправляющая запросы через HTTP-прокси.
+
+    Зачем свой класс: aiogram-овский ``AiohttpSession(proxy=...)`` опирается на
+    пакет ``aiohttp-socks`` и без него не работает вовсе. А aiohttp прекрасно
+    умеет HTTP-прокси сам (параметр ``proxy=`` у запроса), поэтому лишняя
+    зависимость на Python 3.8 нам не нужна.
+
+    Подходит именно HTTP-прокси. Для SOCKS нужен aiohttp-socks.
+    """
+
+    def __init__(self, proxy: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._proxy_url = proxy
+
+    async def make_request(
+        self,
+        bot: Bot,
+        method: TelegramMethod[TelegramType],
+        timeout: Optional[int] = None,
+    ) -> TelegramType:
+        session = await self.create_session()
+        url = self.api.api_url(token=bot.token, method=method.__api_method__)
+        form = self.build_form_data(bot=bot, method=method)
+
+        try:
+            async with session.post(
+                url,
+                data=form,
+                timeout=self.timeout if timeout is None else timeout,
+                proxy=self._proxy_url,
+            ) as resp:
+                raw_result = await resp.text()
+        except asyncio.TimeoutError:
+            raise TelegramNetworkError(method=method, message="Request timeout error")
+        except ClientError as exc:
+            raise TelegramNetworkError(
+                method=method, message=f"{type(exc).__name__}: {exc}"
+            )
+
+        response = self.check_response(
+            bot=bot, method=method, status_code=resp.status, content=raw_result
+        )
+        return cast(TelegramType, response.result)
+
+    async def stream_content(
+        self,
+        url: str,
+        headers: Optional[Dict[str, Any]] = None,
+        timeout: int = 30,
+        chunk_size: int = 65536,
+        raise_for_status: bool = True,
+    ):
+        session = await self.create_session()
+        async with session.get(
+            url,
+            timeout=timeout,
+            headers=headers or {},
+            raise_for_status=raise_for_status,
+            proxy=self._proxy_url,
+        ) as resp:
+            async for chunk in resp.content.iter_chunked(chunk_size):
+                yield chunk
 
 
 log = logging.getLogger("torrent-bot")
@@ -705,7 +773,7 @@ async def main() -> None:
     session = None
     if CONFIG.telegram_proxy:
         log.info("Telegram Bot API через прокси: %s", CONFIG.telegram_proxy)
-        session = AiohttpSession(proxy=CONFIG.telegram_proxy)
+        session = ProxiedAiohttpSession(proxy=CONFIG.telegram_proxy)
 
     bot = Bot(
         token=CONFIG.telegram_token,
