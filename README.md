@@ -510,8 +510,14 @@ chmod +x /etc/init.d/xray-socks-lan
 vi /etc/init.d/xray-socks-lan      # при необходимости поправьте XRAY_BIN
 /etc/init.d/xray-socks-lan enable
 /etc/init.d/xray-socks-lan start
-netstat -lnpt | grep 1080          # ждём 0.0.0.0:1080
+netstat -lnpt | grep 1080          # ждём 0.0.0.0:1080 или :::1080
 ```
+
+> `:::` в netstat — это IPv6-wildcard. На Linux при `net.ipv6.bindv6only=0`
+> (значение по умолчанию) такой сокет принимает и IPv4-соединения, так что
+> Xpenology подключится по `192.168.x.x:1080` без изменений. Если вдруг IPv4 не
+> проходит — укажите в конфиге конкретный адрес вместо wildcard:
+> `"listen": "192.168.1.2"` (LAN-адрес OpenWrt) и перезапустите сервис.
 
 В `.env`:
 
