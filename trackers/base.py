@@ -24,6 +24,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -182,6 +183,10 @@ class BaseTracker(ABC):
         self._proxies = proxies
         self._cookies_path = Path(cookies_path)
         self._timeout = timeout
+        self._user_agent = user_agent
+        # True, когда UA задан явно (например, взятый из браузера вместе с
+        # cf_clearance). Тогда переопределяем UA поверх impersonate.
+        self._custom_ua = False
         self._session = self._build_session(user_agent)
         self._loaded_at: float = 0.0
 
@@ -203,8 +208,10 @@ class BaseTracker(ABC):
             # выставляет согласованный набор заголовков под выбранный браузер;
             # если переопределить хотя бы UA, Cloudflare увидит расхождение
             # «TLS от Chrome 131 — заголовки от Chrome 124» и снова даст челлендж.
+            extra = {"User-Agent": user_agent} if self._custom_ua else {}
             session = curl_requests.Session(
                 impersonate=IMPERSONATE,
+                headers=extra,
                 proxies=dict(self._proxies),
                 timeout=self._timeout,
                 trust_env=False,
@@ -241,6 +248,55 @@ class BaseTracker(ABC):
     def _cookies_file(self) -> Path:
         return self._cookies_path.with_suffix(f".{self.name}.pickle")
 
+    # ------------------------------------------------------------------ #
+    #  Импорт cookies / UA из браузера (для обхода Cloudflare)
+    # ------------------------------------------------------------------ #
+    def _host(self) -> str:
+        return urlparse(self.base_url).hostname or ""
+
+    def set_user_agent(self, user_agent: str) -> None:
+        """Задать UA вручную (должен совпадать с тем, где получен cf_clearance)."""
+        user_agent = (user_agent or "").strip()
+        if not user_agent or user_agent == self._user_agent:
+            return
+        old_session = self._session
+        self._user_agent = user_agent
+        self._custom_ua = True
+        self._session = self._build_session(user_agent)
+        try:
+            self._session.cookies = old_session.cookies
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            old_session.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def import_cookies(self, raw: str) -> int:
+        """Разобрать строку вида ``name=value; name2=value2`` и подставить в сессию."""
+        parsed: Dict[str, str] = {}
+        for chunk in re.split(r"[;\n]", raw or ""):
+            chunk = chunk.strip()
+            if not chunk or "=" not in chunk:
+                continue
+            name, value = chunk.split("=", 1)
+            name, value = name.strip(), value.strip()
+            if name:
+                parsed[name] = value
+
+        if not parsed:
+            raise TrackerError("не нашёл ни одной пары name=value")
+
+        host = self._host()
+        for name, value in parsed.items():
+            self._session.cookies.set(name, value, domain=host, path="/")
+        return len(parsed)
+
+    def verify_session(self) -> str:
+        """Дёрнуть главную страницу и сказать, прошла ли проверка Cloudflare."""
+        response = self.fetch(self.base_url)
+        return f"HTTP {response.status_code}, {len(response.text)} байт"
+
     def _cookies_for_pickle(self):
         """CookieJar для сериализации.
 
@@ -258,6 +314,9 @@ class BaseTracker(ABC):
                     {
                         "saved_at": time.time(),
                         "cookies": self._cookies_for_pickle(),
+                        # UA важен: cf_clearance привязан к паре IP + User-Agent.
+                        "user_agent": self._user_agent,
+                        "proxy": self._proxies.get("https") or self._proxies.get("http") or "",
                     },
                     fh,
                 )
@@ -277,6 +336,20 @@ class BaseTracker(ABC):
             if ttl_days and age_days > ttl_days:
                 log.info("[%s] cookies устарели (%.1f дн.), нужен повторный логин", self.name, age_days)
                 return False
+            saved_ua = (payload.get("user_agent") or "").strip()
+            if saved_ua and saved_ua != self._user_agent:
+                # Отпечаток cf_clearance привязан к UA — восстанавливаем его.
+                self.set_user_agent(saved_ua)
+
+            saved_proxy = (payload.get("proxy") or "").strip()
+            current_proxy = self._proxies.get("https") or self._proxies.get("http") or ""
+            if saved_proxy and saved_proxy != current_proxy:
+                log.warning(
+                    "[%s] cookies получены через другой прокси (%s), а сейчас %s — "
+                    "cf_clearance может не подойти",
+                    self.name, saved_proxy, current_proxy or "direct",
+                )
+
             self._session.cookies = payload["cookies"]
             self._loaded_at = payload.get("saved_at", 0.0)
             log.info("[%s] cookies загружены (возраст %.1f дн.)", self.name, age_days)

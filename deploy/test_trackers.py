@@ -17,6 +17,7 @@ Shows:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,17 @@ def main() -> int:
     print(f"query     : {query!r}")
     print("=" * 68)
 
+    # Optional: test browser cookies without touching Telegram, e.g.
+    #   sudo env TRACKER_COOKIES='cf_clearance=...; bb_session=...' \
+    #            TRACKER_UA='Mozilla/5.0 ...' \
+    #       .venv/bin/python deploy/test_trackers.py interstellar
+    raw_cookies = os.getenv("TRACKER_COOKIES", "").strip()
+    raw_ua = os.getenv("TRACKER_UA", "").strip()
+    if raw_cookies:
+        print("browser cookies : provided via TRACKER_COOKIES")
+    if raw_ua:
+        print("user agent      : provided via TRACKER_UA")
+
     for name, cls in (("rutracker", RuTrackerTracker), ("kinozal", KinozalTracker)):
         tracker = cls(
             proxies=cfg.proxies,
@@ -52,6 +64,15 @@ def main() -> int:
         )
         try:
             tracker.load_cookies(cfg.cookies_ttl_days)
+            if raw_ua:
+                tracker.set_user_agent(raw_ua)
+            if raw_cookies:
+                count = tracker.import_cookies(raw_cookies)
+                print(f"[{name}] imported {count} cookies; verify -> ", end="")
+                try:
+                    print(tracker.verify_session())
+                except Exception as exc:  # noqa: BLE001
+                    print(f"{type(exc).__name__}: {exc}")
             results = tracker.search(query, 8)
             print(f"\n[{name}] found: {len(results)}")
             for item in results:

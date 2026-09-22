@@ -260,6 +260,13 @@ class SearchFlow(StatesGroup):
     waiting_query = State()
 
 
+class CookieFlow(StatesGroup):
+    """Импорт cookies/User-Agent из браузера (обход Cloudflare)."""
+
+    waiting_cookies = State()
+    waiting_ua = State()
+
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -295,6 +302,7 @@ async def cmd_start(message: Message) -> None:
         "/search запрос — поиск раздачи на трекерах\n"
         "/login_rutracker — обновить сессию rutracker\n"
         "/login_kinozal — обновить сессию kinozal\n"
+        "/cookies rutracker|kinozal — импорт cookies из браузера (Cloudflare)\n"
         "/status — активные загрузки\n"
         "/stats — суммарная статистика\n"
         "/dirs — показать список папок\n"
@@ -523,6 +531,111 @@ async def on_search_query(message: Message, state: FSMContext) -> None:
     if not query or query.startswith("/"):
         return await message.answer("Поиск отменён.", reply_markup=main_menu())
     await _run_search(message, query)
+
+
+# --------------------------------------------------------------------------- #
+#  Импорт cookies из браузера (Cloudflare)
+# --------------------------------------------------------------------------- #
+COOKIE_HELP = (
+    "Использование: <code>/cookies rutracker</code> или "
+    "<code>/cookies kinozal</code>\n\n"
+    "Зачем: трекеры закрыты Cloudflare-челленджем, который в состоянии решить "
+    "только браузер. Один раз проходишь проверку в браузере (через тот же "
+    "прокси, что у бота) и присылаешь сюда cookies, включая "
+    "<code>cf_clearance</code>, плюс User-Agent того же браузера."
+)
+
+
+@router.message(Command("cookies"))
+async def cmd_cookies(message: Message, state: FSMContext) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+
+    arg = (message.text or "").partition(" ")[2].strip().lower()
+    if arg not in trackers:
+        return await message.answer(f"🍪 {COOKIE_HELP}")
+
+    await state.set_state(CookieFlow.waiting_cookies)
+    await state.update_data(tracker=arg)
+    await message.answer(
+        f"🍪 Пришли строку cookies для <b>{arg}</b> в формате "
+        "<code>name=value; name2=value2</code>.\n\n"
+        "Где взять: браузер → F12 → <b>Application</b> → Cookies → выбрать домен "
+        f"<code>{tracker_host(arg)}</code> → скопировать значения "
+        "(обязательно нужен <code>cf_clearance</code>).\n\n"
+        "Отмена — /cancel"
+    )
+
+
+def tracker_host(name: str) -> str:
+    try:
+        return urlparse(trackers[name].base_url).hostname or name
+    except Exception:  # noqa: BLE001
+        return name
+
+
+@router.message(StateFilter(CookieFlow.waiting_cookies))
+async def on_cookies_input(message: Message, state: FSMContext) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    raw = (message.text or "").strip()
+    if not raw or raw.startswith("/"):
+        await state.clear()
+        return await message.answer("Отменено.", reply_markup=main_menu())
+
+    data = await state.get_data()
+    name = data.get("tracker", "rutracker")
+    tracker = trackers.get(name)
+    if tracker is None:
+        await state.clear()
+        return await message.answer("Неизвестный трекер.")
+
+    try:
+        count = await to_thread(tracker.import_cookies, raw)
+    except Exception as exc:  # noqa: BLE001
+        return await message.answer(f"❌ Не разобрал cookies: {exc}")
+
+    await state.update_data(cookies=raw)
+    await state.set_state(CookieFlow.waiting_ua)
+    await message.answer(
+        f"✅ Принял cookies: <b>{count}</b>.\n\n"
+        "Теперь пришли <b>User-Agent</b> того же браузера "
+        "(F12 → Network → любой запрос → Request Headers → User-Agent).\n"
+        "Это критично: <code>cf_clearance</code> привязан к паре IP + User-Agent.\n\n"
+        "Если не знаешь — пришли <code>-</code>, оставим текущий."
+    )
+
+
+@router.message(StateFilter(CookieFlow.waiting_ua))
+async def on_ua_input(message: Message, state: FSMContext) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    name = data.get("tracker", "rutracker")
+    tracker = trackers.get(name)
+    await state.clear()
+    if tracker is None:
+        return await message.answer("Неизвестный трекер.")
+
+    if text and text not in ("-", "none", "нет"):
+        await to_thread(tracker.set_user_agent, text)
+    await to_thread(tracker.save_cookies)
+
+    status = await message.answer("🔎 Проверяю сессию через прокси...")
+    try:
+        result = await to_thread(tracker.verify_session)
+    except Exception as exc:  # noqa: BLE001
+        return await status.edit_text(
+            f"⚠️ Cookies сохранены, но проверка не прошла:\n{exc}\n\n"
+            "Скорее всего User-Agent не совпал или cookies уже истекли."
+        )
+    await status.edit_text(
+        f"✅ Cookies сохранены, проверка пройдена: {result}\n"
+        "Пробуйте /search."
+    )
 
 
 @router.message(Command("searchraw"))
