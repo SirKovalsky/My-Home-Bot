@@ -137,15 +137,18 @@ current_value() {
 }
 
 set_env() {
-	# Robust in-place update (values may contain / : + = etc).
-	"$VENV_PY" - "$ENV_FILE" "$1" "$2" <<'PY'
+	# Robust in-place update. Values may contain / : + = and even non-UTF-8
+	# bytes: on DSM the locale is usually "C", so Python decodes argv with
+	# surrogateescape and a stray high byte becomes a lone surrogate.
+	# PYTHONUTF8=1 + surrogateescape round-trips whatever came in.
+	PYTHONUTF8=1 "$VENV_PY" - "$ENV_FILE" "$1" "$2" <<'PY'
 import pathlib, sys
 
 path = pathlib.Path(sys.argv[1])
 key, value = sys.argv[2], sys.argv[3]
-lines = path.read_text(encoding="utf-8").splitlines()
+text = path.read_text(encoding="utf-8", errors="surrogateescape")
 out, found = [], False
-for line in lines:
+for line in text.splitlines():
     if line.startswith(key + "="):
         out.append(f"{key}={value}")
         found = True
@@ -153,7 +156,7 @@ for line in lines:
         out.append(line)
 if not found:
     out.append(f"{key}={value}")
-path.write_text("\n".join(out) + "\n", encoding="utf-8")
+path.write_text("\n".join(out) + "\n", encoding="utf-8", errors="surrogateescape")
 PY
 }
 
@@ -173,6 +176,37 @@ ask() {
 	fi
 	read -r ANSWER || ANSWER=""
 	[ -n "$ANSWER" ] || ANSWER="$_default"
+}
+
+# Like ask(), but keeps asking until the answer matches an ERE pattern.
+# Guards against non-ASCII bytes sneaking into IPs/ports/tokens when the
+# terminal locale is not UTF-8.
+ask_valid() {
+	_prompt=$1
+	_default=$2
+	_pattern=$3
+	_errmsg=$4
+	while :; do
+		ask "$_prompt" "$_default"
+		if printf '%s' "$ANSWER" | grep -Eq "$_pattern"; then
+			return 0
+		fi
+		printf '  ! %s\n' "$_errmsg"
+	done
+}
+
+# Like ask(), but requires a valid TCP port (1..65535).
+ask_port() {
+	_prompt=$1
+	_default=$2
+	while :; do
+		ask "$_prompt" "$_default"
+		if printf '%s' "$ANSWER" | grep -Eq '^[0-9]{1,5}$' \
+			&& [ "$ANSWER" -ge 1 ] && [ "$ANSWER" -le 65535 ]; then
+			return 0
+		fi
+		printf '  ! enter a port between 1 and 65535\n'
+	done
 }
 
 is_placeholder() {
@@ -206,12 +240,16 @@ configure_env() {
 
 	# --- Telegram ---
 	echo "-- Telegram --"
-	ask "  Bot token (from @BotFather)" "$cur_token"
+	ask_valid "  Bot token (from @BotFather)" "$cur_token" \
+		'^([0-9]{6,}:[A-Za-z0-9_-]{20,})?$' \
+		"expected like 123456789:AA... (Enter alone to skip and set it later)"
 	if [ -n "$ANSWER" ]; then
 		set_env TELEGRAM_BOT_TOKEN "$ANSWER"
 	fi
 
-	ask "  Allowed user ids (comma separated, empty = everyone)" "$(current_value ALLOWED_USER_IDS)"
+	ask_valid "  Allowed user ids (comma separated, empty = everyone)" \
+		"$(current_value ALLOWED_USER_IDS)" '^[0-9, ]*$' \
+		"only digits and commas, e.g. 111111111,222222222"
 	set_env ALLOWED_USER_IDS "$ANSWER"
 
 	# --- Proxy to trackers ---
@@ -231,11 +269,14 @@ configure_env() {
 	esac
 	[ -n "$cur_host" ] || cur_host=""
 
-	ask "  Scheme (socks5h recommended)" "${cur_scheme:-socks5h}"
+	ask_valid "  Scheme (socks5h recommended)" "${cur_scheme:-socks5h}" \
+		'^(socks5h|socks5|http|https)$' "use socks5h, socks5, http or https"
 	PROXY_SCHEME="$ANSWER"
-	ask "  OpenWrt address (IP or hostname)" "$cur_host"
+	ask_valid "  OpenWrt address (IP or hostname)" "$cur_host" \
+		'^[A-Za-z0-9._-]+$' "ASCII letters, digits, dot and hyphen only"
 	PROXY_HOST="$ANSWER"
-	ask "  Port (xray-socks-lan uses 1080; v2rayA SOCKS5 usually 20170)" "${cur_port:-1080}"
+	ask_port "  Port (xray-socks-lan uses 1080; v2rayA SOCKS5 usually 20170)" \
+		"${cur_port:-1080}"
 	PROXY_PORT="$ANSWER"
 	if [ -n "$PROXY_HOST" ]; then
 		set_env PROXY_URL "${PROXY_SCHEME}://${PROXY_HOST}:${PROXY_PORT}"
@@ -244,9 +285,10 @@ configure_env() {
 	# --- Transmission RPC (no proxy) ---
 	echo
 	echo "-- Transmission RPC (used WITHOUT proxy) --"
-	ask "  Host" "$(current_value TRANSMISSION_HOST)"
+	ask_valid "  Host" "$(current_value TRANSMISSION_HOST)" \
+		'^[A-Za-z0-9._-]+$' "ASCII letters, digits, dot and hyphen only"
 	set_env TRANSMISSION_HOST "$ANSWER"
-	ask "  Port" "$(current_value TRANSMISSION_PORT)"
+	ask_port "  Port" "$(current_value TRANSMISSION_PORT)"
 	set_env TRANSMISSION_PORT "$ANSWER"
 	ask "  RPC username (empty if none)" "$(current_value TRANSMISSION_USER)"
 	set_env TRANSMISSION_USER "$ANSWER"
@@ -256,7 +298,8 @@ configure_env() {
 	# --- Download dirs ---
 	echo
 	echo "-- Download folders (Plex) --"
-	ask "  Base directory" "/volume2/downloads2"
+	ask_valid "  Base directory" "/volume2/downloads2" \
+		'^/[A-Za-z0-9._/-]*$' "absolute path with ASCII characters only"
 	BASE_DIR_DL="$ANSWER"
 	set_env DOWNLOAD_DIR_MOVIES "$BASE_DIR_DL/Movies"
 	set_env DOWNLOAD_DIR_SERIES "$BASE_DIR_DL/Series"
