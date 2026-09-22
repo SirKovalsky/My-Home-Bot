@@ -30,7 +30,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import TelegramMethod
 from aiogram.methods.base import TelegramType
 from aiohttp import ClientError
@@ -251,6 +254,12 @@ def track_chat(message: Message) -> None:
         known_chats.add(message.chat.id)
 
 
+class SearchFlow(StatesGroup):
+    """Состояние «жду текст запроса после нажатия 🔎 Поиск»."""
+
+    waiting_query = State()
+
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -438,7 +447,8 @@ async def _search_all(query: str, per_tracker: int = 6) -> Tuple[List[SearchResu
 def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for idx, item in enumerate(results):
-        label = f"{idx + 1}. [{item.tracker}] {item.title}"
+        seeds = f"{item.seeds}↑ " if item.seeds else ""
+        label = f"{idx + 1}. [{item.tracker}] {seeds}{item.title}"
         if len(label) > 60:
             label = label[:59] + "…"
         rows.append(
@@ -450,22 +460,7 @@ def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(Command("search"))
-async def cmd_search(message: Message) -> None:
-    if not is_allowed(message):
-        return await deny(message)
-    track_chat(message)
-
-    query = (message.text or "").partition(" ")[2].strip()
-    if not query:
-        return await message.answer(
-            "🔎 <b>Поиск по трекерам</b>\n\n"
-            "Использование: <code>/search название</code>\n"
-            "Например: <code>/search Интерстеллар</code>\n\n"
-            "Ищет на rutracker и kinozal через прокси. Дальше выберете раздачу "
-            "кнопкой и подтвердите папку."
-        )
-
+async def _run_search(message: Message, query: str) -> None:
     status = await message.answer(f"🔎 Ищу «{_escape(query)}» через прокси...")
     results, errors = await _search_all(query)
 
@@ -485,10 +480,71 @@ async def cmd_search(message: Message) -> None:
         created=time.time(),
     )
     await status.edit_text(
-        f"🔎 По запросу «{_escape(query)}» найдено {len(results)}. "
-        "Выберите раздачу:",
+        f"🔎 По запросу «{_escape(query)}» найдено {len(results)} "
+        "(отсортировано по раздающим). Выберите раздачу:",
         reply_markup=_search_keyboard(token, results),
     )
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu())
+
+
+@router.message(Command("search"))
+async def cmd_search(message: Message) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+
+    query = (message.text or "").partition(" ")[2].strip()
+    if not query:
+        return await message.answer(
+            "🔎 <b>Поиск по трекерам</b>\n\n"
+            "Использование: <code>/search название</code>\n"
+            "Например: <code>/search Интерстеллар</code>\n\n"
+            "Или нажмите кнопку «🔎 Поиск» в меню и просто пришлите название.\n"
+            "Ищет на rutracker и kinozal через прокси, сортирует по сидам."
+        )
+    await _run_search(message, query)
+
+
+@router.message(StateFilter(SearchFlow.waiting_query))
+async def on_search_query(message: Message, state: FSMContext) -> None:
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+    await state.clear()
+
+    query = (message.text or "").strip()
+    if not query or query.startswith("/"):
+        return await message.answer("Поиск отменён.", reply_markup=main_menu())
+    await _run_search(message, query)
+
+
+@router.message(Command("searchraw"))
+async def cmd_searchraw(message: Message) -> None:
+    """Диагностика: сохраняет HTML страницы поиска, чтобы подстроить парсер."""
+    if not is_allowed(message):
+        return await deny(message)
+    query = (message.text or "").partition(" ")[2].strip()
+    if not query:
+        return await message.answer("Использование: <code>/searchraw запрос</code>")
+
+    status = await message.answer("🧪 Забираю сырой HTML страниц поиска...")
+    lines: List[str] = []
+    for name, tracker in trackers.items():
+        try:
+            html = await to_thread(tracker.search_html, query)
+            path = config_module.BASE_DIR / f"debug-search-{name}.html"
+            path.write_text(html, encoding="utf-8", errors="replace")
+            lines.append(f"{name}: {len(html)} байт → <code>{path.name}</code>")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"{name}: {type(exc).__name__}: {exc}")
+    await status.edit_text("🧪 Готово:\n" + "\n".join(lines))
 
 
 @router.callback_query(F.data.startswith("pick|"))
@@ -551,12 +607,21 @@ async def on_cancel_search(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("menu|"))
-async def on_menu(callback: CallbackQuery) -> None:
+async def on_menu(callback: CallbackQuery, state: FSMContext) -> None:
     if not _user_allowed(callback.from_user.id):
         return await callback.answer("⛔ Нет доступа", show_alert=True)
 
     _, _, action = (callback.data or "menu|").partition("|")
     await callback.answer()
+
+    if action == "search":
+        await state.set_state(SearchFlow.waiting_query)
+        if callback.message:
+            await callback.message.answer(
+                "🔎 Что искать? Пришлите название следующим сообщением.\n"
+                "Отмена — /cancel"
+            )
+        return
 
     try:
         if action == "status":
@@ -565,8 +630,6 @@ async def on_menu(callback: CallbackQuery) -> None:
             text = await _stats_text()
         elif action == "dirs":
             text = _dirs_text()
-        elif action == "search":
-            text = "🔎 Пришлите: <code>/search название раздачи</code>"
         else:
             text = "Неизвестное действие."
     except TransmissionUnavailable as exc:
@@ -983,7 +1046,7 @@ async def main() -> None:
         log.error("Ошибка конфигурации: %s", problem)
         sys.exit(1)
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)

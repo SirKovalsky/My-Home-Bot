@@ -90,6 +90,8 @@ class SearchResult:
     url: str
     topic_id: str = ""
     size: str = ""
+    seeds: int = 0
+    leeches: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +106,27 @@ def clean_html(text: str) -> str:
     text = _TAG_RE.sub("", text or "")
     text = html_module.unescape(text)
     return _WS_RE.sub(" ", text).strip()
+
+
+# Целые числа в отдельных ячейках таблицы (например «1 234» как разряды).
+_CELL_NUM_RE = re.compile(r">\s*([0-9][0-9\s\u00a0]*?)\s*<")
+
+
+def row_numbers(row_html: str, max_n: int = 4) -> List[int]:
+    """Первые числа из ячеек строки таблицы — эвристика для «сидов/личов».
+
+    Разметка трекеров меняется, поэтому это best-effort: если числа не
+    найдутся, вернётся пустой список, а сортировка просто не изменит порядок.
+    """
+    numbers: List[int] = []
+    for raw in _CELL_NUM_RE.findall(row_html or ""):
+        try:
+            numbers.append(int(raw.replace(" ", "").replace("\u00a0", "")))
+        except ValueError:
+            continue
+        if len(numbers) >= max_n:
+            break
+    return numbers
 
 
 class BaseTracker(ABC):
@@ -267,6 +290,10 @@ class BaseTracker(ABC):
     @abstractmethod
     def search(self, query: str, limit: int = 10) -> List[SearchResult]:
         """Ищет раздачи по названию (запрос идёт через прокси)."""
+
+    def search_html(self, query: str) -> str:
+        """Сырой HTML страницы поиска — для диагностики парсера."""
+        raise NotImplementedError
 
     def is_logged_in(self) -> bool:
         """Эвристика: есть ли хотя бы одна сессионная cookie."""

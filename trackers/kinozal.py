@@ -17,6 +17,7 @@ from .base import (
     TorrentResult,
     TrackerError,
     clean_html,
+    row_numbers,
 )
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ SEARCH_LINK_RE = re.compile(
     r'<a[^>]*\bhref="[^"]*?details\.php\?id=(\d+)[^"]*"[^>]*>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
 )
+ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 
 
 class KinozalTracker(BaseTracker):
@@ -117,13 +119,17 @@ class KinozalTracker(BaseTracker):
     # ------------------------------------------------------------------ #
     #  Поиск
     # ------------------------------------------------------------------ #
+    def search_html(self, query: str) -> str:
+        """Сырой HTML страницы поиска (запрос идёт через прокси)."""
+        return self.fetch(f"{self.base_url}browse.php", params={"s": query}).text
+
     def search(self, query: str, limit: int = 10) -> List[SearchResult]:
         query = (query or "").strip()
         if not query:
             return []
 
         log.info("[kinozal] поиск через прокси: %r", query)
-        html = self.fetch(f"{self.base_url}browse.php", params={"s": query}).text
+        html = self.search_html(query)
 
         if self._looks_logged_out(html):
             raise NotLoggedInError(
@@ -132,7 +138,10 @@ class KinozalTracker(BaseTracker):
 
         results: List[SearchResult] = []
         seen = set()
-        for match in SEARCH_LINK_RE.finditer(html):
+        for row in ROW_RE.findall(html):
+            match = SEARCH_LINK_RE.search(row)
+            if not match:
+                continue
             topic_id = match.group(1)
             if topic_id in seen:
                 continue
@@ -140,17 +149,21 @@ class KinozalTracker(BaseTracker):
             if not title:
                 continue
             seen.add(topic_id)
+
+            numbers = row_numbers(row)
             results.append(
                 SearchResult(
                     tracker=self.name,
                     title=title,
                     url=f"{self.base_url}details.php?id={topic_id}",
                     topic_id=topic_id,
+                    seeds=numbers[0] if numbers else 0,
+                    leeches=numbers[1] if len(numbers) > 1 else 0,
                 )
             )
-            if len(results) >= limit:
-                break
-        return results
+
+        results.sort(key=lambda item: item.seeds, reverse=True)
+        return results[:limit]
 
     def _download_torrent(self, download_url: str) -> bytes:
         log.info("[kinozal] скачиваю .torrent через прокси: %s", download_url)
