@@ -17,16 +17,19 @@ import asyncio
 import functools
 import logging
 import secrets
+import socket
 import sys
 import time
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Optional, Set
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -645,6 +648,44 @@ def _escape(text: str) -> str:
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# --------------------------------------------------------------------------- #
+#  Проверка связности перед запуском
+# --------------------------------------------------------------------------- #
+def _tcp_check(host: str, port: int, timeout: float = 5.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+async def preflight() -> None:
+    """Быстрые подсказки при старте: доступны ли прокси.
+
+    Не фатально: бот продолжает работу, но в логе сразу видно, что адрес/порт
+    прокси указаны неверно - а не только по таймауту через минуту.
+    """
+    parsed = urlparse(CONFIG.proxy_url)
+    if parsed.hostname and parsed.port:
+        if await to_thread(_tcp_check, parsed.hostname, parsed.port):
+            log.info("Прокси трекеров доступен: %s", CONFIG.proxy_url)
+        else:
+            log.warning(
+                "Прокси трекеров НЕДОСТУПЕН (TCP %s:%s). Проверьте адрес/порт "
+                "в PROXY_URL и правило firewall на OpenWrt.",
+                parsed.hostname, parsed.port,
+            )
+
+    if CONFIG.telegram_proxy:
+        tp = urlparse(CONFIG.telegram_proxy)
+        if tp.hostname and tp.port and not await to_thread(_tcp_check, tp.hostname, tp.port):
+            log.warning(
+                "Telegram-прокси НЕДОСТУПЕН (TCP %s:%s). Проверьте "
+                "TELEGRAM_PROXY_URL и firewall на OpenWrt.",
+                tp.hostname, tp.port,
+            )
+
+
 async def main() -> None:
     setup_logging()
 
@@ -679,8 +720,18 @@ async def main() -> None:
     except TransmissionUnavailable as exc:
         log.warning("Transmission сейчас недоступен: %s", exc)
 
+    await preflight()
+
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    except TelegramNetworkError as exc:
+        log.error("Нет связи с Telegram Bot API: %s", exc)
+        log.error("Что проверить:")
+        log.error("  1) открывается ли api.telegram.org с этого NAS напрямую;")
+        log.error("  2) если провайдер его блокирует - задайте TELEGRAM_PROXY_URL")
+        log.error("     (HTTP-прокси, напр. http://<IP_OpenWrt>:11081) и перезапустите;")
+        log.error("  3) диагностика: .venv/bin/python deploy/check_proxy.py")
+        raise SystemExit(1)
     finally:
         await bot.session.close()
 
