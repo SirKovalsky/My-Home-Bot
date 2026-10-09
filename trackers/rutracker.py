@@ -65,6 +65,9 @@ class RuTrackerTracker(BaseTracker):
                 "login_username": login,
                 "login_password": password,
                 "redirect": "index.php",
+                # Поле кнопки «Вход» обязательно: без него rutracker возвращает
+                # ту же форму логина и НЕ выдаёт bb_session.
+                "login": "submit",
             },
             headers={"Referer": f"{self.base_url}index.php"},
         )
