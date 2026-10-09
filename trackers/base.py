@@ -309,13 +309,32 @@ class BaseTracker(ABC):
         response = self.fetch(self.base_url)
         return f"HTTP {response.status_code}, {len(response.text)} байт"
 
-    def _cookies_for_pickle(self):
-        """CookieJar для сериализации.
+    def _cookies_for_pickle(self) -> List[Dict[str, str]]:
+        """Cookies в простом (сериализуемом) виде.
 
-        У curl_cffi cookies — обёртка с .jar внутри; у requests это уже jar.
+        Раньше сюда возвращался сам CookieJar — и pickle.dump падал с
+        «cannot pickle '_thread.RLock' object»: внутри jar лежит блокировка
+        (и у requests, и у обёртки curl_cffi). Поэтому сохраняем плоский
+        список словарей, а восстанавливаем через session.cookies.set(...).
         """
-        cookies = self._session.cookies
-        return getattr(cookies, "jar", cookies)
+        items: List[Dict[str, str]] = []
+        try:
+            raw_cookies = list(self._session.cookies)
+        except Exception:  # noqa: BLE001
+            raw_cookies = []
+        for cookie in raw_cookies:
+            name = getattr(cookie, "name", "") or ""
+            if not name:
+                continue
+            items.append(
+                {
+                    "name": name,
+                    "value": getattr(cookie, "value", "") or "",
+                    "domain": getattr(cookie, "domain", "") or "",
+                    "path": getattr(cookie, "path", "") or "/",
+                }
+            )
+        return items
 
     def save_cookies(self) -> None:
         path = self._cookies_file()
@@ -333,7 +352,7 @@ class BaseTracker(ABC):
                     fh,
                 )
             log.info("[%s] cookies сохранены: %s", self.name, path)
-        except OSError as exc:
+        except (OSError, TypeError, pickle.PickleError) as exc:
             log.warning("[%s] не удалось сохранить cookies: %s", self.name, exc)
 
     def load_cookies(self, ttl_days: int = 14) -> bool:
@@ -362,11 +381,52 @@ class BaseTracker(ABC):
                     self.name, saved_proxy, current_proxy or "direct",
                 )
 
-            self._session.cookies = payload["cookies"]
+            # CookieJar присваивать нельзя: в старых файлах лежал объект jar
+            # (именно на нём и падала запись), в новых — список словарей.
+            saved = payload.get("cookies")
+            if isinstance(saved, dict):
+                saved = [{"name": k, "value": v} for k, v in saved.items()]
+
+            restored = 0
+            if isinstance(saved, list):
+                host = self._host()
+                for item in saved:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "")
+                    if not name:
+                        continue
+                    value = str(item.get("value") or "")
+                    domain = str(item.get("domain") or "") or host
+                    cookie_path = str(item.get("path") or "/") or "/"
+                    try:
+                        self._session.cookies.set(
+                            name, value, domain=domain, path=cookie_path
+                        )
+                    except Exception:  # noqa: BLE001
+                        try:
+                            self._session.cookies.set(name, value)
+                        except Exception:  # noqa: BLE001
+                            continue
+                    restored += 1
+
+            if not restored:
+                log.info(
+                    "[%s] в %s нет пригодных cookies — нужен повторный логин",
+                    self.name,
+                    path,
+                )
+                return False
+
             self._loaded_at = payload.get("saved_at", 0.0)
-            log.info("[%s] cookies загружены (возраст %.1f дн.)", self.name, age_days)
+            log.info(
+                "[%s] cookies загружены (%d шт., возраст %.1f дн.)",
+                self.name,
+                restored,
+                age_days,
+            )
             return True
-        except (OSError, pickle.PickleError, KeyError, EOFError) as exc:
+        except (OSError, TypeError, AttributeError, pickle.PickleError, KeyError, EOFError) as exc:
             log.warning("[%s] cookies повреждены, игнорируем: %s", self.name, exc)
             return False
 
