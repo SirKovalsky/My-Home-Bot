@@ -67,14 +67,21 @@ log = logging.getLogger(__name__)
 IMPERSONATE = os.getenv("CURL_IMPERSONATE", "chrome").strip() or "chrome"
 
 # Маркеры капчи/антибота, встречающиеся на rutracker/kinozal.
+# ВАЖНО: нельзя использовать просто «cloudflare» — на обычных страницах
+# трекеров есть скрипт static.cloudflareinsights.com, из-за которого живая
+# страница с результатами поиска принималась за челлендж.
 CAPTCHA_MARKERS = (
+    "just a moment",
+    "checking your browser",
+    "challenge-platform",
+    "cf-chl",
+    "cf_chl",
+    "attention required",
+    "ddos-guard",
+    "are you human",
     "captcha",
     "капча",
     "подтвердите, что вы не робот",
-    "are you human",
-    "cloudflare",
-    "ddos-guard",
-    "attention required",
 )
 
 # Маркеры разлогиненной сессии.
@@ -354,11 +361,25 @@ class BaseTracker(ABC):
         (и у requests, и у обёртки curl_cffi). Поэтому сохраняем плоский
         список словарей, а восстанавливаем через session.cookies.set(...).
         """
+        container = self._session.cookies
+        jar = getattr(container, "jar", None)
+
+        # У curl_cffi итерация по Cookies отдаёт ИМЕНА строк, а не объекты
+        # Cookie: из-за этого список получался пустым и cookies не сохранялись
+        # (каждый поиск заново решал Cloudflare). Поэтому сначала пробуем
+        # внутренний CookieJar — в нём лежат Cookie с доменом и путём.
+        raw_cookies: List[Any] = []
+        for source in (jar, container):
+            if source is None:
+                continue
+            try:
+                found = list(source)
+            except Exception:  # noqa: BLE001
+                found = []
+            if found and not isinstance(found[0], str):
+                raw_cookies = found
+                break
         items: List[Dict[str, str]] = []
-        try:
-            raw_cookies = list(self._session.cookies)
-        except Exception:  # noqa: BLE001
-            raw_cookies = []
         for cookie in raw_cookies:
             name = getattr(cookie, "name", "") or ""
             if not name:
@@ -371,6 +392,26 @@ class BaseTracker(ABC):
                     "path": getattr(cookie, "path", "") or "/",
                 }
             )
+
+        if not items:
+            # Запасной путь: словарь name->value. Домен неизвестен — при
+            # загрузке подставим host трекера.
+            getter = getattr(container, "get_dict", None)
+            if callable(getter):
+                try:
+                    data = getter() or {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+                if isinstance(data, dict):
+                    for name, value in data.items():
+                        items.append(
+                            {
+                                "name": str(name),
+                                "value": str(value),
+                                "domain": "",
+                                "path": "/",
+                            }
+                        )
         return items
 
     def save_cookies(self) -> None:

@@ -206,6 +206,15 @@ class KinozalTracker(BaseTracker):
         return f"{self.base_url}get_sid.php?id={topic_id}"
 
     def _absolute(self, href: str) -> str:
+        """Абсолютный URL из href со страницы kinozal.
+
+        Ссылка на .torrent бывает протокол-относительной
+        («//dl.kinozal.me/download.php?id=...»). Приклеивать такой href к
+        base_url нельзя — выйдет «kinozal.me/dl.kinozal.me/download.php?...».
+        """
+        href = (href or "").strip()
+        if href.startswith("//"):
+            return "https:" + href
         if href.startswith("http://") or href.startswith("https://"):
             return href
         return f"{self.base_url}{href.lstrip('/')}"
