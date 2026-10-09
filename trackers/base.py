@@ -313,7 +313,12 @@ class BaseTracker(ABC):
     def set_user_agent(self, user_agent: str) -> None:
         """Задать UA вручную (должен совпадать с тем, где получен cf_clearance)."""
         user_agent = (user_agent or "").strip()
-        if not user_agent or user_agent == self._user_agent:
+        if not user_agent:
+            return
+        # Пересобираем сессию не только при смене строки: важно, чтобы UA был
+        # вообще «закреплён» поверх impersonate. Иначе curl_cffi отправит свой
+        # UA, а cf_clearance выдан под другой — Cloudflare ответит 403.
+        if user_agent == self._user_agent and self._custom_ua:
             return
         old_session = self._session
         self._user_agent = user_agent
