@@ -184,6 +184,7 @@ class PendingTorrent:
     magnet: Optional[str] = None
     torrent_bytes: Optional[bytes] = None
     source: str = ""
+    url: str = ""
     created: float = 0.0
 
 
@@ -547,16 +548,12 @@ async def _search_all(
 def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for idx, item in enumerate(results):
-        # В подписи кнопки — трекер, сиды и объём раздачи, затем название.
-        prefix = f"{idx + 1}. [{item.tracker}] {item.seeds}↑"
+        # В подписи кнопки — только номер, трекер, сиды и объём: длинные
+        # названия Telegram всё равно визуально обрезает. Полные названия
+        # показываются в тексте сообщения (см. _run_search).
+        label = f"{idx + 1}. [{item.tracker}] {item.seeds}↑"
         if item.size:
-            prefix += f" {item.size}"
-        prefix += " "
-        room = max(16, 62 - len(prefix))
-        title = item.title
-        if len(title) > room:
-            title = title[: room - 1] + "…"
-        label = prefix + title
+            label += f" {item.size}"
         rows.append(
             [InlineKeyboardButton(text=label, callback_data=f"pick|{token}|{idx}")]
         )
@@ -564,6 +561,14 @@ def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardM
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancelsearch|{token}")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_result_line(idx: int, item: SearchResult) -> str:
+    """Строка выдачи: номер, трекер, сиды, объём и полное название."""
+    head = f"{idx + 1}. [{item.tracker}] {item.seeds}↑"
+    if item.size:
+        head += f" {item.size}"
+    return f"{head}\n{_escape(item.title)}"
 
 
 async def _run_search(message: Message, query: str, only: str = "") -> None:
@@ -591,11 +596,19 @@ async def _run_search(message: Message, query: str, only: str = "") -> None:
         results=results,
         created=time.time(),
     )
-    await status.edit_text(
-        f"🔎 По запросу «{_escape(query)}» найдено {len(results)} "
-        "(отсортировано по раздающим). Выберите раздачу:",
-        reply_markup=_search_keyboard(token, results),
+    listing = "\n\n".join(
+        _format_result_line(idx, item) for idx, item in enumerate(results)
     )
+    text = (
+        f"🔎 По запросу «{_escape(query)}» найдено {len(results)} "
+        "(отсортировано по раздающим).\n"
+        "Нажмите номер кнопки, чтобы добавить раздачу:\n\n"
+        f"{listing}"
+    )
+    # Telegram не принимает сообщения длиннее 4096 символов.
+    if len(text) > 3900:
+        text = text[:3899] + "…"
+    await status.edit_text(text, reply_markup=_search_keyboard(token, results))
 
 
 @router.message(Command("cancel"))
@@ -819,6 +832,7 @@ async def on_pick_result(callback: CallbackQuery) -> None:
             torrent_bytes=resolved.torrent_bytes,
             source=f"{result.tracker}: {result.url}",
             user_id=callback.from_user.id,
+            url=result.url,
         )
 
 
@@ -988,6 +1002,7 @@ async def propose_folder(
     source: str = "",
     status_message: Optional[Message] = None,
     user_id: Optional[int] = None,
+    url: str = "",
 ) -> None:
     _prune_pending()
 
@@ -1009,6 +1024,7 @@ async def propose_folder(
         magnet=magnet,
         torrent_bytes=torrent_bytes,
         source=source,
+        url=url,
         created=time.time(),
     )
 
@@ -1035,11 +1051,13 @@ async def propose_folder(
         f"{hint}\n\n"
         "Подтвердите кнопкой ниже или выберите другую папку."
     )
-    markup = _build_folder_keyboard(token, suggested)
+    markup = _build_folder_keyboard(token, suggested, url)
     await _respond(message, status_message, text, reply_markup=markup)
 
 
-def _build_folder_keyboard(token: str, suggested: str) -> InlineKeyboardMarkup:
+def _build_folder_keyboard(
+    token: str, suggested: str, url: str = ""
+) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for cat, label, _path in torrent_parser.category_choices():
@@ -1054,6 +1072,9 @@ def _build_folder_keyboard(token: str, suggested: str) -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
+    if url:
+        # Раздачу можно открыть в браузере: посмотреть описание, скриншоты и т.п.
+        rows.append([InlineKeyboardButton(text="🌐 Открыть раздачу", url=url)])
     rows.append(
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel|{token}")]
     )
@@ -1104,7 +1125,14 @@ async def on_folder_chosen(callback: CallbackQuery) -> None:
     ]
     if pending.source:
         lines.append(f"Источник: {_escape(pending.source)}")
-    await _edit(callback, "\n".join(lines))
+    markup = None
+    if pending.url:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Открыть раздачу", url=pending.url)]
+            ]
+        )
+    await _edit(callback, "\n".join(lines), reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("cancel|"))
