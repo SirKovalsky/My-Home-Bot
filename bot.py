@@ -41,7 +41,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 import config as config_module
@@ -282,6 +284,21 @@ def main_menu() -> InlineKeyboardMarkup:
     )
 
 
+# Текст постоянной нижней кнопки. Лежит в константе, потому что по этой же
+# строке ловится нажатие: текст кнопки и фильтр обязаны совпадать символ в символ.
+MENU_BUTTON_TEXT = "☰ Меню"
+
+
+def menu_button() -> ReplyKeyboardMarkup:
+    """Постоянная кнопка под полем ввода, открывающая инлайн-меню."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=MENU_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="magnet, .torrent или ссылка на раздачу",
+    )
+
+
 # --------------------------------------------------------------------------- #
 #  Команды
 # --------------------------------------------------------------------------- #
@@ -315,11 +332,29 @@ async def cmd_start(message: Message) -> None:
         f"{CONFIG.transmission_port}</code> (без прокси)",
         reply_markup=main_menu(),
     )
+    # Отдельным сообщением включаем постоянную нижнюю кнопку: в одном
+    # сообщении Telegram разрешает только одну клавиатуру — либо инлайн, либо
+    # обычную, поэтому меню и кнопка идут двумя сообщениями.
+    await message.answer(
+        f"Кнопка <b>{MENU_BUTTON_TEXT}</b> теперь всегда внизу — "
+        "она открывает это меню в любой момент.",
+        reply_markup=menu_button(),
+    )
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await cmd_start(message)
+
+
+@router.message(F.text == MENU_BUTTON_TEXT)
+async def on_menu_button(message: Message, state: FSMContext) -> None:
+    """Нажатие постоянной нижней кнопки — показываем то же меню, что и /start."""
+    if not is_allowed(message):
+        return await deny(message)
+    track_chat(message)
+    await state.clear()
+    await message.answer("☰ <b>Меню</b>", reply_markup=main_menu())
 
 
 def _dirs_text() -> str:
