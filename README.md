@@ -300,6 +300,11 @@ python bot.py
 | `PROXY_URL` | SOCKS5-вход на OpenWrt. **Используйте `socks5h://`** — тогда DNS резолвит сторона прокси. Пример: `socks5h://192.168.1.2:20170`. Значение `direct` (или пусто) = трекеры ходят **напрямую**, без прокси |
 | `PROXY_TIMEOUT` | таймаут запросов к трекерам, сек (по умолчанию 30) |
 
+### Решатель Cloudflare (FlareSolverr)
+| Переменная | Описание |
+|---|---|
+| `FLARESOLVERR_URL` | локальный адрес FlareSolverr, по умолчанию `http://127.0.0.1:8191/v1`. Пусто/`none`/`off` — выключить. Бот обращается к нему **без прокси** (как к Transmission) и только при `CaptchaError`, после чего повторяет запрос с полученными cookies и User-Agent. Подробности — в разделе 8 |
+
 ### Transmission (без прокси)
 | Переменная | Описание |
 |---|---|
@@ -942,14 +947,13 @@ sudo .venv/bin/python deploy/test_trackers.py интерстеллар
 
 ### Что действительно решает
 
-1. **HTTP/3 (QUIC) напрямую с домашнего канала.** В QUIC `SNI` зашифрован,
-   поэтому DPI его не видит, и запрос уходит **с резидентного IP** — такие
-   Cloudflare не челленджит. Тогда `PROXY_URL=direct` и никаких прокси.
-   Требуется: UDP/443 не заблокирован, трекер отдаёт h3 (Cloudflare умеет),
-   и клиент с HTTP/3. В wheel `curl_cffi` QUIC **не собран** —
-   `http_version=V3` падает с `curl: (1)`; нужна сборка curl с `ngtcp2`
-   либо `aioquic`.
-   Проверка: `.venv/bin/python deploy/test_trackers.py ИМЯ` при `PROXY_URL=direct`.
+1. ~~**HTTP/3 (QUIC) напрямую с домашнего канала.**~~ **Проверено — не работает.**
+   QUIC действительно прячет `SNI` от простого DPI, но оператор вскрывает
+   Initial-пакеты (их ключ публичный) и режет по имени так же, как в TCP:
+   на **одном и том же IP** `SNI=cloudflare.com` → `200`, `SNI=rutracker.org`
+   → таймаут — и по TCP, и по QUIC. Расширение `ECH` тоже блокируется: любой
+   ClientHello с ним не доходит даже до заведомо рабочего адреса. Вывод: спрятать
+   имя сайта на этом канале нельзя.
 2. **Выходной узел с «чистой» репутацией IP.** Челлендж зависит от адреса:
    другой сервер/локация может пройти без всяких ухищрений. Быстрая проверка —
    переключить узел в v2rayA и снова прогнать `test_trackers.py`.
@@ -957,6 +961,50 @@ sudo .venv/bin/python deploy/test_trackers.py интерстеллар
    «🔎 Искать на rutracker / kinozal», они открывают результаты в браузере
    телефона; скачанный `.torrent` (или magnet) отправляется боту, и он сам
    делает категорию, папку и Transmission.
+4. **Локальный FlareSolverr** — см. следующий подраздел; это то, что сейчас
+   работает.
+
+### Рабочее решение: локальный решатель Cloudflare (FlareSolverr)
+
+Бот не исполняет JavaScript, поэтому рядом с ним ставится **настоящий Chromium**
+(FlareSolverr). Он проходит челлендж и отдаёт готовые cookies (`cf_clearance`)
+вместе со своим User-Agent; бот подставляет их в сессию трекера и повторяет
+запрос **ровно один раз**.
+
+Главное условие: решатель и бот должны выходить в интернет **через один и тот
+же внешний IP** — `cf_clearance` привязан к паре «IP + User-Agent».
+
+Установка на том же хосте, где живёт бот:
+
+```bash
+sudo docker run -d --name flaresolverr --restart unless-stopped \
+  -p 127.0.0.1:8191:8191 \
+  -e LOG_LEVEL=info \
+  --shm-size=1g \
+  ghcr.io/flaresolverr/flaresolverr:latest
+```
+
+В `.env`:
+
+```bash
+FLARESOLVERR_URL=http://127.0.0.1:8191/v1
+```
+
+Проверка, что решатель действительно проходит челлендж:
+
+```bash
+curl -s -X POST http://127.0.0.1:8191/v1 -H 'Content-Type: application/json' \
+  -d '{"cmd":"request.get","url":"https://rutracker.org/forum/tracker.php?nm=matrix","maxTimeout":120000}' \
+  | head -c 300
+```
+
+Ожидается `"status":"ok"` и непустой `cf_clearance`. Если `cf_clearance` пустой —
+страница челленджем не защищена: спрашивать надо именно `login.php` или
+`tracker.php`. Отключить решатель: `FLARESOLVERR_URL=` (пусто), `none` или `off`.
+
+Код: `trackers/solver.py` (клиент), вызов — в `trackers/base.py`
+(`_request` → `_solve_challenge` → повтор). Решатель опрашивается локально
+**без прокси**, как и Transmission.
 
 ### Чего делать не стоит
 

@@ -51,6 +51,7 @@ from config import CONFIG
 from trackers import (
     BaseTracker,
     CaptchaError,
+    FlareSolverr,
     KinozalTracker,
     NotLoggedInError,
     ProxyUnavailableError,
@@ -143,18 +144,25 @@ router = Router()
 # Клиенты создаются один раз.
 transmission = TransmissionClient(CONFIG)
 
+# Решатель Cloudflare: один на оба трекера. Опрашивается локально и без
+# прокси — ровно как клиент Transmission. Таймаут с запасом: FlareSolverr сам
+# ждёт прохождения челленджа до 120 секунд.
+solver = FlareSolverr(CONFIG.flaresolverr_url, timeout=180)
+
 trackers: Dict[str, BaseTracker] = {
     "rutracker": RuTrackerTracker(
         proxies=CONFIG.proxies,
         cookies_path=CONFIG.cookies_path,
         user_agent=CONFIG.user_agent,
         timeout=CONFIG.proxy_timeout,
+        solver=solver,
     ),
     "kinozal": KinozalTracker(
         proxies=CONFIG.proxies,
         cookies_path=CONFIG.cookies_path,
         user_agent=CONFIG.user_agent,
         timeout=CONFIG.proxy_timeout,
+        solver=solver,
     ),
 }
 

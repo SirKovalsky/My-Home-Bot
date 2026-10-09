@@ -11,6 +11,7 @@ from .base import (
 )
 from .kinozal import KinozalTracker
 from .rutracker import RuTrackerTracker
+from .solver import FlareSolverr, SolverError
 
 __all__ = [
     "BaseTracker",
@@ -22,4 +23,6 @@ __all__ = [
     "SearchResult",
     "RuTrackerTracker",
     "KinozalTracker",
+    "FlareSolverr",
+    "SolverError",
 ]

@@ -138,6 +138,10 @@ class Config:
     proxy_url: str = _get("PROXY_URL", "socks5h://127.0.0.1:1080")
     proxy_timeout: int = _get_int("PROXY_TIMEOUT", 30)
 
+    # Локальный решатель Cloudflare (FlareSolverr): проходит JS-челлендж и
+    # отдаёт cookies (cf_clearance) + User-Agent. Пусто/none/off — выключено.
+    flaresolverr_url: str = _get("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1")
+
     # Optional proxy for the Telegram Bot API only (api.telegram.org is blocked
     # in some networks). Leave empty when Telegram is reachable directly.
     # HTTP(S) is preferred: aiohttp supports it natively, so no extra Python

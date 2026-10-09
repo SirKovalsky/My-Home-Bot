@@ -167,6 +167,12 @@ def row_numbers(row_html: str, max_n: int = 4) -> List[int]:
     return numbers
 
 
+# Решатель Cloudflare. Импорт стоит здесь, а не в шапке файла, чтобы не
+# переупорядочивать уже сложившийся блок импортов: solver.py от base.py не
+# зависит, циклического импорта нет.
+from .solver import FlareSolverr, SolverError
+
+
 class BaseTracker(ABC):
     """Базовый класс трекера с изолированной (проксированной) HTTP-сессией."""
 
@@ -179,11 +185,17 @@ class BaseTracker(ABC):
         cookies_path: Path,
         user_agent: str,
         timeout: int = 30,
+        solver=None,
     ) -> None:
         self._proxies = proxies
         self._cookies_path = Path(cookies_path)
         self._timeout = timeout
         self._user_agent = user_agent
+        # Решатель Cloudflare (FlareSolverr). Может быть None — тогда челлендж
+        # не обходим, а показываем пользователю обычную ошибку.
+        self._solver = solver
+        # Защита от повторного входа, пока идёт решение челленджа.
+        self._solving = False
         # True, когда UA задан явно (например, взятый из браузера вместе с
         # cf_clearance). Тогда переопределяем UA поверх impersonate.
         self._custom_ua = False
@@ -369,8 +381,22 @@ class BaseTracker(ABC):
         # сессию, конкретный запрос всё равно уйдёт через OpenWrt.
         kwargs["proxies"] = self._proxies
 
+        response = self._send(method, url, **kwargs)
         try:
-            response = self._session.request(method, url, **kwargs)
+            self._check_captcha(response)
+        except CaptchaError:
+            # Похоже на челлендж Cloudflare. Если рядом поднят FlareSolverr,
+            # просим его пройти проверку и повторяем запрос ровно один раз.
+            if not self._solve_challenge(url):
+                raise
+            response = self._send(method, url, **kwargs)
+            self._check_captcha(response)
+        return response
+
+    def _send(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Один сетевой вызов с переводом ошибок библиотеки в наши типы."""
+        try:
+            return self._session.request(method, url, **kwargs)
         except _ProxyError as exc:
             raise ProxyUnavailableError(
                 f"Прокси {self._proxies.get('https')} недоступен: {exc}"
@@ -386,14 +412,79 @@ class BaseTracker(ABC):
         except Exception as exc:  # noqa: BLE001
             raise TrackerError(f"Неожиданная ошибка запроса к {url}: {exc}") from exc
 
-        self._check_captcha(response)
-        return response
-
     def fetch(self, url: str, **kwargs) -> requests.Response:
         return self._request("GET", url, **kwargs)
 
     def post(self, url: str, **kwargs) -> requests.Response:
         return self._request("POST", url, **kwargs)
+
+    # ------------------------------------------------------------------ #
+    #  Обход Cloudflare через FlareSolverr
+    # ------------------------------------------------------------------ #
+    def apply_solver_session(
+        self, cookies: Dict[str, str], user_agent: str = ""
+    ) -> None:
+        """Подставить cookies и User-Agent, полученные от FlareSolverr.
+
+        Порядок важен: сначала меняем UA (это пересобирает сессию), потом
+        кладём cookies — иначе они потеряются при пересборке.
+        """
+        user_agent = (user_agent or "").strip()
+        if user_agent and user_agent != self._user_agent:
+            self.set_user_agent(user_agent)
+
+        host = self._host()
+        for name, value in cookies.items():
+            try:
+                self._session.cookies.set(name, value, domain=host, path="/")
+            except Exception:  # noqa: BLE001
+                try:
+                    self._session.cookies.set(name, value)
+                except Exception:  # noqa: BLE001
+                    log.debug("[%s] не смог поставить cookie %s", self.name, name)
+
+        try:
+            self.save_cookies()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[%s] cookies не сохранились: %s", self.name, exc)
+
+    def _solve_challenge(self, url: str) -> bool:
+        """Пройти челлендж Cloudflare и обновить сессию.
+
+        Возвращает True, если cookies обновлены и запрос имеет смысл повторить.
+        Исключений не бросает: любая проблема решателя — это просто «не
+        получилось», и вызывающий код покажет обычную ошибку капита.
+        """
+        if self._solver is None or not getattr(self._solver, "enabled", False):
+            return False
+        if self._solving:  # защита от повторного входа
+            return False
+
+        if self._proxies:
+            # cf_clearance привязан к внешнему IP. Трекеры ходят через прокси,
+            # а FlareSolverr — напрямую, поэтому cookie поможет только если
+            # внешний IP у них общий.
+            log.warning(
+                "[%s] трекеры ходят через прокси, а FlareSolverr — напрямую: "
+                "cf_clearance совпадёт только при общем внешнем IP",
+                self.name,
+            )
+
+        self._solving = True
+        try:
+            cookies, user_agent = self._solver.solve(url)
+        except SolverError as exc:
+            log.warning("[%s] FlareSolverr не смог пройти челлендж: %s", self.name, exc)
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] FlareSolverr: неожиданная ошибка: %s", self.name, exc)
+            return False
+        finally:
+            self._solving = False
+
+        self.apply_solver_session(cookies, user_agent)
+        log.info("[%s] Cloudflare пройден, повторяю запрос", self.name)
+        return True
 
     @staticmethod
     def _check_captcha(response: requests.Response) -> None:
