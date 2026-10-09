@@ -452,6 +452,12 @@ async def _search_all(query: str, per_tracker: int = 6) -> Tuple[List[SearchResu
         except Exception as exc:  # noqa: BLE001
             log.exception("Ошибка поиска на %s", name)
             errors.append(f"💥 {name}: {exc}")
+
+    # Выдача обоих трекеров сливается в один список, поэтому сортируем её по
+    # раздающим здесь: внутри каждого трекера сортировка уже сделана, но без
+    # этого все результаты rutracker шли бы раньше всех результатов kinozal.
+    # Сортировка устойчивая — при равных сидах порядок трекеров сохраняется.
+    results.sort(key=lambda item: item.seeds, reverse=True)
     return results, errors
 
 
