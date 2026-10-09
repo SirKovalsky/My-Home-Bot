@@ -288,6 +288,14 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📁 Папки", callback_data="menu|dirs"),
                 InlineKeyboardButton(text="🔎 Поиск", callback_data="menu|search"),
             ],
+            [
+                InlineKeyboardButton(
+                    text="🔎 Поиск rutracker", callback_data="menu|sr"
+                ),
+                InlineKeyboardButton(
+                    text="🔎 Поиск kinozal", callback_data="menu|sk"
+                ),
+            ],
         ]
     )
 
@@ -505,10 +513,14 @@ async def cmd_stats(message: Message) -> None:
 # --------------------------------------------------------------------------- #
 #  Поиск по трекерам
 # --------------------------------------------------------------------------- #
-async def _search_all(query: str, per_tracker: int = 6) -> Tuple[List[SearchResult], List[str]]:
+async def _search_all(
+    query: str, per_tracker: int = 6, only: str = ""
+) -> Tuple[List[SearchResult], List[str]]:
     results: List[SearchResult] = []
     errors: List[str] = []
-    for name in ("rutracker", "kinozal"):
+    # only — конкретный трекер, когда поиск запущен его кнопкой.
+    names = [only] if only in trackers else ["rutracker", "kinozal"]
+    for name in names:
         tracker = trackers[name]
         try:
             results.extend(await to_thread(tracker.search, query, per_tracker))
@@ -535,10 +547,16 @@ async def _search_all(query: str, per_tracker: int = 6) -> Tuple[List[SearchResu
 def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for idx, item in enumerate(results):
-        seeds = f"{item.seeds}↑ " if item.seeds else ""
-        label = f"{idx + 1}. [{item.tracker}] {seeds}{item.title}"
-        if len(label) > 60:
-            label = label[:59] + "…"
+        # В подписи кнопки — трекер, сиды и объём раздачи, затем название.
+        prefix = f"{idx + 1}. [{item.tracker}] {item.seeds}↑"
+        if item.size:
+            prefix += f" {item.size}"
+        prefix += " "
+        room = max(16, 62 - len(prefix))
+        title = item.title
+        if len(title) > room:
+            title = title[: room - 1] + "…"
+        label = prefix + title
         rows.append(
             [InlineKeyboardButton(text=label, callback_data=f"pick|{token}|{idx}")]
         )
@@ -548,9 +566,12 @@ def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _run_search(message: Message, query: str) -> None:
-    status = await message.answer(f"🔎 Ищу «{_escape(query)}» через прокси...")
-    results, errors = await _search_all(query)
+async def _run_search(message: Message, query: str, only: str = "") -> None:
+    where = f" ({only})" if only else ""
+    status = await message.answer(
+        f"🔎 Ищу «{_escape(query)}»{where} через прокси..."
+    )
+    results, errors = await _search_all(query, only=only)
 
     if not results:
         cloudflare = any("just a moment" in err.lower() for err in errors)
@@ -558,7 +579,7 @@ async def _run_search(message: Message, query: str) -> None:
         if errors:
             text += "\n\n" + "\n".join(errors)
         return await status.edit_text(
-            text, reply_markup=_tracker_search_keyboard(query)
+            text, reply_markup=_tracker_search_keyboard(query, only=only)
         )
 
     _prune_pending()
@@ -608,12 +629,15 @@ async def on_search_query(message: Message, state: FSMContext) -> None:
     if not is_allowed(message):
         return await deny(message)
     track_chat(message)
+
+    data = await state.get_data()
+    only = str(data.get("tracker") or "")
     await state.clear()
 
     query = (message.text or "").strip()
     if not query or query.startswith("/"):
         return await message.answer("Поиск отменён.", reply_markup=main_menu())
-    await _run_search(message, query)
+    await _run_search(message, query, only=only)
 
 
 # --------------------------------------------------------------------------- #
@@ -816,11 +840,16 @@ async def on_menu(callback: CallbackQuery, state: FSMContext) -> None:
     _, _, action = (callback.data or "menu|").partition("|")
     await callback.answer()
 
-    if action == "search":
+    if action in ("search", "sr", "sk"):
+        # sr/sk — поиск только по одному трекеру (кнопки «Поиск rutracker» и
+        # «Поиск kinozal»), search — сразу по обоим.
+        only = {"sr": "rutracker", "sk": "kinozal"}.get(action, "")
+        await state.update_data(tracker=only)
         await state.set_state(SearchFlow.waiting_query)
         if callback.message:
+            where = f" на «{only}»" if only else " (rutracker + kinozal)"
             await callback.message.answer(
-                "🔎 Что искать? Пришлите название следующим сообщением.\n"
+                f"🔎 Что искать{where}? Пришлите название следующим сообщением.\n"
                 "Отмена — /cancel"
             )
         return
@@ -871,10 +900,10 @@ async def on_text(message: Message) -> None:
 
     if text.startswith("/"):
         return  # неизвестная команда — молчим
-    await message.answer(
-        "🤔 Не понял. Пришлите magnet, .torrent файл или ссылку на "
-        "rutracker.org / kinozal.me."
-    )
+
+    # Любой обычный текст считаем поисковым запросом: помнить про /search
+    # не нужно — просто напиши название.
+    await _run_search(message, text)
 
 
 @router.message(F.document)
@@ -1245,10 +1274,13 @@ def _open_in_browser_keyboard(
     )
 
 
-def _tracker_search_keyboard(query: str) -> Optional[InlineKeyboardMarkup]:
+def _tracker_search_keyboard(
+    query: str, only: str = ""
+) -> Optional[InlineKeyboardMarkup]:
     """Кнопки «искать в браузере» — работают, когда бот упёрся в Cloudflare."""
     rows: List[List[InlineKeyboardButton]] = []
-    for name in ("rutracker", "kinozal"):
+    names = [only] if only in trackers else ["rutracker", "kinozal"]
+    for name in names:
         tracker = trackers.get(name)
         if tracker is None:
             continue

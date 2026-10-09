@@ -135,6 +135,43 @@ class SearchResult:
 # --------------------------------------------------------------------------- #
 #  Разбор HTML (best effort, без внешних зависимостей)
 # --------------------------------------------------------------------------- #
+# Размер раздачи в строке таблицы: «1.37 GB», «4,7 ГБ» и т.п.
+_SIZE_RE = re.compile(
+    r"(\d[\d\s\u00a0.,]*)\s*(TB|GB|MB|KB|ТБ|ГБ|МБ|КБ|байт|байта|байтов)\b",
+    re.IGNORECASE,
+)
+
+
+def _format_size(match: "re.Match") -> str:
+    """Приводим найденный размер к виду «293 MB» / «37.85 ГБ»."""
+    number = match.group(1).replace("\u00a0", " ").strip().rstrip(".,")
+    return f"{number} {match.group(2)}".strip()
+
+
+# Ячейки таблицы: у обоих трекеров размер лежит в отдельном <td>.
+_TD_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
+
+
+def row_size(row_html: str) -> str:
+    """Размер раздачи из HTML-строки таблицы (best effort).
+
+    Сначала ищем ячейку, которая начинается с размера («293 MB ↓» или
+    «37.85 ГБ»), и лишь потом — любое вхождение единицы измерения в
+    строке. Второй вариант нужен как запасной: без него число с «MB»
+    находится в названии раздачи («MP3, 320 kbps») и это ложное
+    срабатывание.
+    """
+    row_html = row_html or ""
+
+    for cell in _TD_RE.findall(row_html):
+        match = _SIZE_RE.match(clean_html(cell).strip())
+        if match:
+            return _format_size(match)
+
+    match = _SIZE_RE.search(row_html)
+    return _format_size(match) if match else ""
+
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 

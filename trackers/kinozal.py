@@ -19,6 +19,7 @@ from .base import (
     TrackerError,
     clean_html,
     row_numbers,
+    row_size,
 )
 
 log = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ class KinozalTracker(BaseTracker):
                     title=title,
                     url=f"{self.base_url}details.php?id={topic_id}",
                     topic_id=topic_id,
+                    size=row_size(row),
                     seeds=numbers[0] if numbers else 0,
                     leeches=numbers[1] if len(numbers) > 1 else 0,
                 )
