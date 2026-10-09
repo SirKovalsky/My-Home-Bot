@@ -415,14 +415,42 @@ async def _do_login(message: Message, tracker_name: str) -> None:
         await message.answer(f"✅ Сессия {tracker_name} сохранена.")
 
 
+# Transmission помечает активные раздачи статусами downloading/seeding, а
+# стоящие в очереди — download pending/seed pending. Пауза, проверка и
+# завершённые в /status не попадают.
+ACTIVE_STATUSES = ("downloading", "download pending", "seeding", "seed pending")
+
+
 async def _status_text() -> str:
     torrents = await to_thread(transmission.get_status)
     if not torrents:
         return "📭 Список загрузок пуст."
-    active = [t for t in torrents if t.status in ("downloading", "seeding")]
-    header = f"📊 <b>Загрузки</b> ({len(torrents)} всего, {len(active)} активных)\n\n"
-    body = "\n".join(TransmissionClient.format_torrent(t) for t in torrents[:20])
-    note = "\n\n<i>Показаны первые 20.</i>" if len(torrents) > 20 else ""
+
+    active = [t for t in torrents if t.status in ACTIVE_STATUSES]
+    hidden = len(torrents) - len(active)
+
+    if not active:
+        return (
+            "📭 <b>Активных загрузок нет</b>\n\n"
+            f"Всего торрентов: {len(torrents)} — все на паузе, "
+            "в очереди или уже завершены."
+        )
+
+    # Сначала качающиеся, затем раздающиеся; внутри группы — по названию.
+    active.sort(
+        key=lambda t: (0 if t.status.startswith("download") else 1, t.name.lower())
+    )
+
+    downloading = sum(1 for t in active if t.status.startswith("download"))
+    seeding = len(active) - downloading
+    header = (
+        f"📊 <b>Активные загрузки</b> ({len(active)}: "
+        f"качается {downloading}, раздаётся {seeding})\n\n"
+    )
+    body = "\n".join(TransmissionClient.format_torrent(t) for t in active[:20])
+    note = "\n\n<i>Показаны первые 20.</i>" if len(active) > 20 else ""
+    if hidden:
+        note += f"\n<i>Скрыто неактивных: {hidden}.</i>"
     return header + body + note
 
 
