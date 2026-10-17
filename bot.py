@@ -49,6 +49,8 @@ from aiogram.types import (
 import config as config_module
 from config import CONFIG
 from trackers import (
+    KIND_FILTER_LABELS,
+    KIND_LABELS,
     BaseTracker,
     CaptchaError,
     FlareSolverr,
@@ -58,6 +60,7 @@ from trackers import (
     RuTrackerTracker,
     SearchResult,
     TrackerError,
+    parse_query_filters,
 )
 from transmission_client import TransmissionClient, TransmissionUnavailable
 from utils import torrent_parser
@@ -564,19 +567,56 @@ def _search_keyboard(token: str, results: List[SearchResult]) -> InlineKeyboardM
 
 
 def _format_result_line(idx: int, item: SearchResult) -> str:
-    """Строка выдачи: номер, трекер, сиды, объём и полное название."""
+    """Строка выдачи: номер, трекер, сиды, объём, год, тип и полное название."""
     head = f"{idx + 1}. [{item.tracker}] {item.seeds}↑"
     if item.size:
         head += f" {item.size}"
+    meta: List[str] = []
+    if item.year:
+        meta.append(str(item.year))
+    if item.kind:
+        meta.append(KIND_LABELS.get(item.kind, item.kind))
+    if meta:
+        head += " · " + " · ".join(meta)
     return f"{head}\n{_escape(item.title)}"
 
 
 async def _run_search(message: Message, query: str, only: str = "") -> None:
+    # «хрустальный 2021 сериал» -> запрос «хрустальный» + фильтры 2021/series.
+    clean_query, year, kind = parse_query_filters(query)
+    filter_parts: List[str] = []
+    if year:
+        filter_parts.append(str(year))
+    if kind:
+        filter_parts.append(KIND_FILTER_LABELS.get(kind, kind))
+    filters_text = f" ({', '.join(filter_parts)})" if filter_parts else ""
     where = f" ({only})" if only else ""
     status = await message.answer(
-        f"🔎 Ищу «{_escape(query)}»{where} через прокси..."
+        f"🔎 Ищу «{_escape(clean_query)}»{filters_text}{where} через прокси..."
     )
-    results, errors = await _search_all(query, only=only)
+    # С фильтрами качаем больше результатов: часть отсеется по году/типу.
+    per_tracker = 25 if filter_parts else 6
+    raw_results, errors = await _search_all(
+        clean_query, per_tracker=per_tracker, only=only
+    )
+
+    results = raw_results
+    filter_note = ""
+    if year or kind:
+        results = [
+            item
+            for item in raw_results
+            if (not year or item.year == year) and (not kind or item.kind == kind)
+        ]
+        if not results and raw_results:
+            # Под фильтр ничего не подошло — показываем обычную выдачу с пометкой.
+            results = raw_results
+            filter_note = (
+                f"\n\n⚠️ <i>Под фильтр «{_escape(', '.join(filter_parts))}» "
+                "ничего не подошло — показываю без фильтра.</i>"
+            )
+            filters_text = ""
+    results = results[:12]
 
     if not results:
         cloudflare = any("just a moment" in err.lower() for err in errors)
@@ -584,7 +624,7 @@ async def _run_search(message: Message, query: str, only: str = "") -> None:
         if errors:
             text += "\n\n" + "\n".join(errors)
         return await status.edit_text(
-            text, reply_markup=_tracker_search_keyboard(query, only=only)
+            text, reply_markup=_tracker_search_keyboard(clean_query, only=only)
         )
 
     _prune_pending()
@@ -592,7 +632,7 @@ async def _run_search(message: Message, query: str, only: str = "") -> None:
     SEARCHES[token] = SearchSession(
         token=token,
         user_id=message.from_user.id if message.from_user else 0,
-        query=query,
+        query=clean_query,
         results=results,
         created=time.time(),
     )
@@ -600,10 +640,11 @@ async def _run_search(message: Message, query: str, only: str = "") -> None:
         _format_result_line(idx, item) for idx, item in enumerate(results)
     )
     text = (
-        f"🔎 По запросу «{_escape(query)}» найдено {len(results)} "
+        f"🔎 По запросу «{_escape(clean_query)}»{filters_text} найдено {len(results)} "
         "(отсортировано по раздающим).\n"
         "Нажмите номер кнопки, чтобы добавить раздачу:\n\n"
         f"{listing}"
+        f"{filter_note}"
     )
     # Telegram не принимает сообщения длиннее 4096 символов.
     if len(text) > 3900:

@@ -18,6 +18,8 @@ from .base import (
     TorrentResult,
     TrackerError,
     clean_html,
+    detect_kind,
+    extract_release_year,
     row_numbers,
     row_size,
 )
@@ -166,6 +168,9 @@ class KinozalTracker(BaseTracker):
                     size=row_size(row),
                     seeds=numbers[0] if numbers else 0,
                     leeches=numbers[1] if len(numbers) > 1 else 0,
+                    # Год — из названия раздачи («/ 2026 /»), тип — по строке.
+                    year=extract_release_year(title),
+                    kind=detect_kind(clean_html(row)),
                 )
             )
 

@@ -22,8 +22,9 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -137,6 +138,9 @@ class SearchResult:
     size: str = ""
     seeds: int = 0
     leeches: int = 0
+    # Год выхода (из названия раздачи) и тип: series/movies/anime/music/....
+    year: int = 0
+    kind: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -188,6 +192,128 @@ def clean_html(text: str) -> str:
     text = _TAG_RE.sub("", text or "")
     text = html_module.unescape(text)
     return _WS_RE.sub(" ", text).strip()
+
+
+# --------------------------------------------------------------------------- #
+#  Год выхода и тип раздачи (фильтры поиска)
+# --------------------------------------------------------------------------- #
+# 1080p/2160p и т.п. — это разрешение, а не год.
+_RESOLUTION_NUMBERS = {480, 576, 720, 1080, 1440, 2160, 4320}
+_YEAR_TOKEN_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+
+KIND_LABELS = {
+    "series": "сериал",
+    "movies": "фильм",
+    "anime": "аниме",
+    "music": "музыка",
+    "audiobooks": "аудиокнига",
+    "books": "книга",
+}
+KIND_FILTER_LABELS = {
+    "series": "сериалы",
+    "movies": "фильмы",
+    "anime": "аниме",
+    "music": "музыка",
+    "audiobooks": "аудиокниги",
+    "books": "книги",
+}
+
+# Порядок важен: «мультсериал» должен попасть в аниме, а не в сериалы.
+_KIND_MARKERS = (
+    ("anime", ("аниме", "мультсериал")),
+    (
+        "series",
+        ("сериал", "сезон", "серии", "серия", "тв-шоу", "мини-сериал", "tv series"),
+    ),
+    ("audiobooks", ("аудиокниг", "аудиоспектакл", "радиоспектакл")),
+    ("music", ("lossless", "lossy", "flac", "mp3", "дискография", "музыка")),
+    ("movies", ("фильм", "кино", "мультфильм")),
+)
+
+
+def extract_release_year(text: str) -> int:
+    """Год выхода раздачи из её названия, а НЕ дата создания торрента.
+
+    На rutracker год стоит в квадратных скобках (``[1987, Испания, ...]``),
+    на kinozal — отдельным сегментом через слэш (``/ 2026 /``); в обоих
+    случаях это первое правдоподобное четырёхзначное число в названии.
+    """
+    if not text:
+        return 0
+    limit = datetime.now().year + 1
+    for match in _YEAR_TOKEN_RE.finditer(text):
+        year = int(match.group(1))
+        if year in _RESOLUTION_NUMBERS or year > limit:
+            continue
+        # «2160p», «1080i» — разрешение, а не год.
+        if text[match.end():match.end() + 1].lower() in ("p", "i"):
+            continue
+        return year
+    return 0
+
+
+def detect_kind(text: str) -> str:
+    """Тип раздачи по тексту строки таблицы (раздел трекера + название)."""
+    lowered = (text or "").lower()
+    for kind, markers in _KIND_MARKERS:
+        if any(marker in lowered for marker in markers):
+            return kind
+    return ""
+
+
+# Год и тип можно написать прямо в запросе: «хрустальный 2021 сериал».
+_FILTER_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_KIND_ALIASES = {
+    "сериал": "series",
+    "сериалы": "series",
+    "сериальчик": "series",
+    "фильм": "movies",
+    "фильмы": "movies",
+    "кино": "movies",
+    "мультфильм": "movies",
+    "мультфильмы": "movies",
+    "мультик": "movies",
+    "аниме": "anime",
+    "музыка": "music",
+    "музыку": "music",
+    "альбом": "music",
+    "аудиокнига": "audiobooks",
+    "аудиокниги": "audiobooks",
+    "книга": "books",
+    "книги": "books",
+}
+
+
+def parse_query_filters(query: str) -> Tuple[str, int, str]:
+    """Разобрать запрос «хрустальный 2021 сериал» -> («хрустальный», 2021, series).
+
+    Год и тип вырезаются из запроса и становятся фильтрами выдачи. Если
+    кроме них ничего не осталось (запрос «2021» или «сериал»), фильтры
+    отбрасываются и ищем ровно то, что написали.
+    """
+    text = (query or "").strip()
+    if not text:
+        return text, 0, ""
+
+    kept: List[str] = []
+    year = 0
+    kind = ""
+    limit = datetime.now().year + 1
+    for word in text.split():
+        normalized = word.strip(",.!?;:()[]{}\u00ab\u00bb\"'").lower()
+        if not kind and normalized in _KIND_ALIASES:
+            kind = _KIND_ALIASES[normalized]
+            continue
+        if not year and _FILTER_YEAR_RE.fullmatch(normalized):
+            candidate = int(normalized)
+            if candidate <= limit:
+                year = candidate
+                continue
+        kept.append(word)
+
+    if not kept:
+        return text, 0, ""
+    return " ".join(kept), year, kind
 
 
 # Целые числа в отдельных ячейках таблицы (например «1 234» как разряды).
