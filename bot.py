@@ -337,6 +337,8 @@ async def cmd_start(message: Message) -> None:
         "<b>Папку загрузки подтверждаете вы</b> — бот только предлагает вариант.\n\n"
         "<b>Команды:</b>\n"
         "/search запрос — поиск раздачи на трекерах\n"
+        "  <i>«название» 2021 сериал — фильтр по году выхода и типу "
+        "(кавычки нужны, если год есть в самом названии)</i>\n"
         "/login_rutracker — обновить сессию rutracker\n"
         "/login_kinozal — обновить сессию kinozal\n"
         "/cookies rutracker|kinozal — импорт cookies из браузера (Cloudflare)\n"
@@ -905,6 +907,8 @@ async def on_menu(callback: CallbackQuery, state: FSMContext) -> None:
             where = f" на «{only}»" if only else " (rutracker + kinozal)"
             await callback.message.answer(
                 f"🔎 Что искать{where}? Пришлите название следующим сообщением.\n"
+                "Год и тип можно добавить: «хрустальный» 2021 сериал\n"
+                "(кавычки — чтобы год из названия не стал фильтром).\n"
                 "Отмена — /cancel"
             )
         return

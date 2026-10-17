@@ -262,7 +262,24 @@ def detect_kind(text: str) -> str:
 
 
 # Год и тип можно написать прямо в запросе: «хрустальный 2021 сериал».
+# Название можно взять в кавычки — тогда год внутри названия («2012», «1917»)
+# остаётся частью названия, а не становится фильтром.
 _FILTER_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_QUOTED_RE = re.compile(
+    r"\u00ab([^\u00bb]+)\u00bb|\u201c([^\u201d]+)\u201d|\"([^\"]+)\"|'([^']+)'"
+)
+
+
+def _split_quoted(text: str) -> Tuple[str, str]:
+    """Выделить первую quoted-часть: («название», остаток запроса)."""
+    match = _QUOTED_RE.search(text)
+    if not match:
+        return "", text
+    title = next((group for group in match.groups() if group), "").strip()
+    rest = (text[:match.start()] + " " + text[match.end():]).strip()
+    return title, rest
+
+
 _KIND_ALIASES = {
     "сериал": "series",
     "сериалы": "series",
@@ -295,10 +312,30 @@ def parse_query_filters(query: str) -> Tuple[str, int, str]:
     if not text:
         return text, 0, ""
 
-    kept: List[str] = []
+    quoted_title, rest = _split_quoted(text)
+    limit = datetime.now().year + 1
+
+    if quoted_title:
+        # Название в кавычках — берём как есть: год внутри него не фильтр.
+        kept: List[str] = [quoted_title]
+        year = 0
+        kind = ""
+        for word in rest.split():
+            normalized = word.strip(",.!?;:()[]{}\u00ab\u00bb\"'").lower()
+            if not kind and normalized in _KIND_ALIASES:
+                kind = _KIND_ALIASES[normalized]
+                continue
+            if not year and _FILTER_YEAR_RE.fullmatch(normalized):
+                candidate = int(normalized)
+                if candidate <= limit:
+                    year = candidate
+                    continue
+            kept.append(word)
+        return " ".join(kept), year, kind
+
+    kept = []
     year = 0
     kind = ""
-    limit = datetime.now().year + 1
     for word in text.split():
         normalized = word.strip(",.!?;:()[]{}\u00ab\u00bb\"'").lower()
         if not kind and normalized in _KIND_ALIASES:
