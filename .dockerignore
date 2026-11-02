@@ -1,0 +1,16 @@
+# В образ не должны попадать секреты, состояние и мусор.
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+cookies*.pickle
+torrent-bot.log
+torrent-bot.out
+.git/
+.gitignore
+.gitattributes
+@eaDir/
+deploy/
+*.md
+run-forever.sh
